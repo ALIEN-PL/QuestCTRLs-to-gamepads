@@ -157,5 +157,4 @@ The output APK is generated at:
 - **Fork Maintainer:** [ALIEN-PL](https://github.com/ALIEN-PL).
 - **License:** Licensed under the [MIT License](LICENSE).
   - Copyright (c) 2026 Kevin (SonicDX12)
-  - Copyright (c) 2026 ALIEN-PL
 
