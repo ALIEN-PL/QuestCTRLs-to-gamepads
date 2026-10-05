@@ -18,6 +18,8 @@ data class UnifiedGamepadState(
     var accelX: Int = 0,
     var accelY: Int = 0,
     var accelZ: Int = 0,
+    var motionTracked: Boolean = false,
+    var screenshotPressed: Boolean = false,
 
     // Status
     var batteryLeft: Int = 100,
@@ -42,6 +44,8 @@ data class UnifiedGamepadState(
         this.accelX = other.accelX
         this.accelY = other.accelY
         this.accelZ = other.accelZ
+        this.motionTracked = other.motionTracked
+        this.screenshotPressed = other.screenshotPressed
         this.batteryLeft = other.batteryLeft
         this.batteryRight = other.batteryRight
         this.sourceDevice = other.sourceDevice

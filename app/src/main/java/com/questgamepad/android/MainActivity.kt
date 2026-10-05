@@ -238,7 +238,8 @@ class MainActivity : AppCompatActivity() {
             .setMessage(
                 "Map your Meta Quest 2, Quest 3, Quest 3S, Quest Pro (or Steam Controller) into a full Sony DualSense PS5, DualShock 4, or Xbox gamepad!\n\n" +
                 "• Hold Left Thumbrest or Grip to use D-Pad navigation\n" +
-                "• Supports motion aiming (Gyroscope) for DualSense\n" +
+                "• Automatically pauses virtual gamepad output in Horizon system menus\n" +
+                "• Motion emulation requires an integrated controller pose source\n" +
                 "• Supports game force feedback rumble forwarded to Touch haptic motors"
             )
             .setPositiveButton("Got it", null)

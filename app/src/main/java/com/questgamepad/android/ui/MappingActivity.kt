@@ -13,6 +13,7 @@ import com.questgamepad.android.databinding.ItemButtonMappingBinding
 import com.questgamepad.android.input.aggregator.QuestControllerAggregator
 import com.questgamepad.android.input.mapping.QuestSourceButton
 import com.questgamepad.android.input.mapping.TargetGamepadButton
+import com.questgamepad.android.uinput.GamepadProfile
 
 class MappingActivity : AppCompatActivity() {
 
@@ -43,7 +44,9 @@ class MappingActivity : AppCompatActivity() {
     }
 
     private fun showPickTargetDialog(source: QuestSourceButton, position: Int) {
-        val targets = TargetGamepadButton.entries.toTypedArray()
+        val targets = TargetGamepadButton.entries.filter {
+            it != TargetGamepadButton.TOUCHPAD_CLICK || prefs.targetProfile == GamepadProfile.DUALSHOCK_4
+        }.toTypedArray()
         val names = targets.map { it.getDisplayName(isDualSense = true) }.toTypedArray()
 
         val currentTarget = mappingsMap[source] ?: TargetGamepadButton.NONE

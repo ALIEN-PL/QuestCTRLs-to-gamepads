@@ -39,7 +39,8 @@
     <string name="right_deadzone">Right Stick Radial Deadzone</string>
     <string name="invert_left_y">Invert Left Y-Axis</string>
     <string name="invert_right_y">Invert Right Y-Axis</string>
-    <string name="gyro_aiming">Gyro Motion Aiming (DualSense)</string>
+    <string name="gyro_aiming">Gyro to Right Stick</string>
+    <string name="motion_source_unavailable">Controller pose source unavailable. Native Quest evdev does not provide motion tracking.</string>
     <string name="gyro_sensitivity">Gyro Sensitivity</string>
     <string name="rumble_intensity">Haptic Rumble Intensity</string>
     <string name="dpad_threshold">D-Pad Stick Threshold</string>

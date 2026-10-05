@@ -32,5 +32,9 @@ interface IUInputService {
 
     void setForwardingEnabled(boolean enabled);
 
+    void setQuestInputEnabled(boolean enabled);
+
+    int[] readQuestState();
+
     void destroy();
 }

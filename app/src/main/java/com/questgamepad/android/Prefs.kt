@@ -14,6 +14,14 @@ class Prefs(context: Context) {
     private val sp: SharedPreferences =
         context.getSharedPreferences("quest_gamepad_prefs", Context.MODE_PRIVATE)
 
+    fun registerChangeListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) {
+        sp.registerOnSharedPreferenceChangeListener(listener)
+    }
+
+    fun unregisterChangeListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) {
+        sp.unregisterOnSharedPreferenceChangeListener(listener)
+    }
+
     var inputSource: QuestControllerType
         get() = QuestControllerType.fromId(sp.getInt("input_source", QuestControllerType.QUEST_3.id))
         set(value) = sp.edit().putInt("input_source", value.id).apply()

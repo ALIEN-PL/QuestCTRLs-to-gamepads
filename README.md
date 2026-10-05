@@ -15,8 +15,8 @@ Designed specifically for **Meta Horizon OS** (Android) and standalone VR headse
 ## 🎮 Key Features
 
 ### 1. Multi-Controller Support
-- **Meta Quest 3 / 3S (Touch Plus)**: Direct hardware evdev input aggregation, unified dual-stick tracking, ultra-low latency (<1 ms).
-- **Meta Quest Pro (Touch Pro)**: Self-tracking 6DoF, stylus pressure, trigger curl pinch.
+- **Meta Quest 3 / 3S (Touch Plus)**: Hardware evdev input, combined with saved button mappings and stick calibration at approximately 90 Hz.
+- **Meta Quest Pro (Touch Pro)**: Button and stick mapping. Pose, capacitive input and stylus support depend on a separate tracking source, not the evdev reader.
 - **Meta Quest 2 (Touch v3)**: Full dual-controller mapping with tracking rings.
 - **Valve Steam Controller**: USB OTG and Bluetooth LE support (integrated from `SteamController-Android`).
 - **Generic Gamepad / HID**: Remap any physical controller to DualSense / Xbox layout.
@@ -41,11 +41,16 @@ On Quest, the user holds two independent controllers (Left and Right). QuestCTRL
 - **Oculus Button (Right)** ➔ Options / Start / PS Guide
 
 ### 4. D-Pad & Quick-Toggle Features
+- **Live Settings**: Saved mappings, deadzones and stick inversions apply without restarting the service. Explicit trigger remapping suppresses the original analog trigger.
+- **Automatic Horizon Pause**: The Shizuku helper checks the input-focused display every 500 ms. System shell, system UI, the mapper itself and unknown focus pause virtual output. Returning to a game resumes only if manual forwarding remains enabled. Focus detection uses system diagnostics and may need adjustment after Horizon OS updates.
 - **Quick-Toggle Shortcut (L3 + R3)**: Simultaneously clicking both thumbsticks toggles gamepad forwarding on the fly, immediately restoring the VR pointer for system navigation without closing your game.
 - **D-Pad Modifier Shift**: Touching the **Left Thumbrest** transforms the **Left Stick** or buttons into **D-Pad Up/Down/Left/Right**.
 
 ### 5. Gyro Motion Aiming & Force Feedback
-- **DualSense Motion Sensor**: Quest 6DoF controller orientation and angular velocity are fed into DualSense gyro aiming.
+- **Sony IMU Output**: DS4 and DualSense profiles create a separate motion-sensor uinput node. Angular velocity and acceleration are converted to the units expected by Android's Sony sensor mapping; applications must explicitly support gamepad sensors.
+- **Two-Controller Motion Calculation**: `QuestVrInputProvider.updateControllerPoses` accepts two tracked positions and orientations in the same right-handed, Y-up coordinate space, with timestamps in nanoseconds. The hand baseline and averaged controller up vectors define the virtual pad orientation. Successive samples produce local angular velocity and acceleration including gravity. Lost tracking, degenerate poses and gaps over 100 ms reset the calculation.
+- **Current Limitation**: No OpenXR controller-pose source is connected to the background service. The Quest evdev nodes tested on Quest 3 expose buttons and analog axes, not controller poses or IMU. Therefore standalone motion aiming remains unavailable until a tracking integration feeds the provider. Headset motion is not substituted for controller motion.
+- **PSVR Positional Tracking**: PSVR1 tracked the DS4 light bar with PS Camera. Emulating gyro/accelerometer data does not emulate that positional tracking interface or provide XYZ to PSVR games.
 - **Haptic Rumble Pipeline**: Game vibration events intercepted via Linux `FF_RUMBLE` on `/dev/uinput` are forwarded directly as haptic pulses to Quest controller vibration motors.
 
 ---

@@ -157,14 +157,15 @@
                         android:id="@+id/switchGyroAiming"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="DualSense Gyro Motion Aiming"
+                        android:text="@string/gyro_aiming"
                         android:textColor="#FFFFFF"
                         android:textStyle="bold" />
 
                     <TextView
+                        android:id="@+id/tvMotionStatus"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Translates Quest 6DoF controller orientation directly into DualSense motion sensors."
+                        android:text="@string/motion_source_unavailable"
                         android:textColor="#A0AEC0"
                         android:textSize="12sp"
                         android:layout_marginTop="2dp"

@@ -7,6 +7,8 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import androidx.appcompat.app.AppCompatActivity
 import com.questgamepad.android.Prefs
+import com.questgamepad.android.R
+import com.questgamepad.android.service.QuestGamepadService
 import com.questgamepad.android.databinding.ActivityCalibrationBinding
 
 class CalibrationActivity : AppCompatActivity() {
@@ -60,6 +62,9 @@ class CalibrationActivity : AppCompatActivity() {
         binding.sliderGyroSens.addOnChangeListener { _, value, _ ->
             prefs.gyroSensitivity = value
         }
+        binding.tvMotionStatus.text = getString(R.string.motion_source_unavailable)
+        binding.switchGyroAiming.isEnabled = QuestGamepadService.latestState.motionTracked
+        binding.sliderGyroSens.isEnabled = QuestGamepadService.latestState.motionTracked
 
         // Rumble
         binding.sliderRumble.value = prefs.rumbleIntensity.toFloat()

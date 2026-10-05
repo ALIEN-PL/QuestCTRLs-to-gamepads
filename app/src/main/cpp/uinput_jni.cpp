@@ -16,6 +16,8 @@
 #include <dirent.h>
 #include <pthread.h>
 #include <atomic>
+#include <algorithm>
+#include <cmath>
 
 #define LOG_TAG "quest_uinput_jni"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -64,6 +66,7 @@ static const gamepad_profile* find_profile(int id) {
 static int g_fd_gamepad = -1;
 static int g_fd_mouse   = -1;
 static int g_fd_kbd     = -1;
+static int g_fd_sensors = -1;
 
 static int g_last_mouse_buttons = 0;
 static int g_last_kbd_keys      = 0;
@@ -127,6 +130,7 @@ static int32_t g_pending_strong = -1;
 static int32_t g_pending_weak   = -1;
 
 static int finalize_device(int fd, uint16_t vid, uint16_t pid, const char* name, uint32_t ff_effects_max) {
+    if (vid == 0x054C) ioctl(fd, UI_SET_PHYS, "questgamepad/sony");
     struct uinput_setup us;
     memset(&us, 0, sizeof(us));
     us.id.bustype = BUS_USB;
@@ -194,6 +198,53 @@ fail:
     return -1;
 }
 
+static int create_sensors_fd(const gamepad_profile& profile) {
+    int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+    if (fd < 0) return -1;
+    if (set_bit_or_log(fd, UI_SET_EVBIT, EV_ABS, "sensor EV_ABS") < 0) goto fail;
+    if (set_bit_or_log(fd, UI_SET_EVBIT, EV_SYN, "sensor EV_SYN") < 0) goto fail;
+    if (set_bit_or_log(fd, UI_SET_EVBIT, EV_MSC, "sensor EV_MSC") < 0) goto fail;
+    if (set_bit_or_log(fd, UI_SET_MSCBIT, MSC_TIMESTAMP, "sensor timestamp") < 0) goto fail;
+    if (set_bit_or_log(fd, UI_SET_PROPBIT, INPUT_PROP_ACCELEROMETER, "sensor property") < 0) goto fail;
+    for (int axis : {ABS_X, ABS_Y, ABS_Z, ABS_RX, ABS_RY, ABS_RZ}) {
+        int resolution = axis <= ABS_Z ? 8192 : 1024;
+        int range = axis <= ABS_Z ? 4 * resolution : 2048 * resolution;
+        if (setup_abs(fd, axis, -range, range, 0, 0) < 0) goto fail;
+        struct uinput_abs_setup setup = {};
+        setup.code = axis;
+        setup.absinfo.minimum = -range;
+        setup.absinfo.maximum = range;
+        setup.absinfo.resolution = resolution;
+        if (ioctl(fd, UI_ABS_SETUP, &setup) < 0) goto fail;
+    }
+    {
+        char name[UINPUT_MAX_NAME_SIZE];
+        snprintf(name, sizeof(name), "%s Motion Sensors", profile.name);
+        if (finalize_device(fd, profile.vid, profile.pid, name, 0) < 0) goto fail;
+    }
+    return fd;
+fail:
+    close(fd);
+    return -1;
+}
+
+static void write_motion_frame(int gyroX, int gyroY, int gyroZ, int accelX, int accelY, int accelZ) {
+    if (g_fd_sensors < 0) return;
+    const int gyro[] = {gyroX, gyroY, gyroZ};
+    const int accel[] = {accelX, accelY, accelZ};
+    for (int axis = 0; axis < 3; axis++) {
+        int angular = std::clamp(static_cast<int>(std::lround(gyro[axis] * (1024.0 * 180.0 / (1000.0 * 3.141592653589793)))), -2097152, 2097152);
+        int acceleration = std::clamp(static_cast<int>(std::lround(accel[axis] * (8192.0 / 9806.65))), -32768, 32768);
+        write_event(g_fd_sensors, EV_ABS, ABS_RX + axis, angular);
+        write_event(g_fd_sensors, EV_ABS, ABS_X + axis, acceleration);
+    }
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint32_t timestamp = static_cast<uint32_t>(static_cast<uint64_t>(now.tv_sec) * 1000000 + now.tv_nsec / 1000);
+    write_event(g_fd_sensors, EV_MSC, MSC_TIMESTAMP, static_cast<int32_t>(timestamp));
+    write_event(g_fd_sensors, EV_SYN, SYN_REPORT, 0);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // DIRECT HARDWARE QUEST EVDEV READER PIPELINE
 // Runs directly inside the Shizuku shell process.
@@ -219,8 +270,11 @@ struct QuestHwState {
 static QuestHwState g_hw_state;
 static int g_current_profile_id = 3; // Default DualSense
 static std::atomic<bool> g_forwarding_enabled{true};
+static std::atomic<bool> g_system_paused{true};
+static bool g_quest_input_enabled = false;
 static pthread_mutex_t g_state_mutex = PTHREAD_MUTEX_INITIALIZER;
 static std::atomic<bool> g_reader_running{false};
+static bool g_both_clicked_last = false;
 static pthread_t g_reader_thread;
 
 static uint32_t g_last_buttons = 0xFFFFFFFF;
@@ -233,11 +287,11 @@ static int32_t g_last_rt = 999999;
 static int32_t g_last_dpadX = 999999;
 static int32_t g_last_dpadY = 999999;
 
-static void forward_state_to_uinput(const QuestHwState& s) {
+static void forward_state_to_uinput(const QuestHwState& s, bool force = false) {
     if (g_fd_gamepad < 0) return;
-    if (!g_forwarding_enabled.load()) return;
+    if (!force && (!g_forwarding_enabled.load() || g_system_paused.load())) return;
 
-    bool isPlayStation = (g_current_profile_id == 2 || g_current_profile_id == 3);
+    bool isPlayStation = g_current_profile_id == 3;
     // On PlayStation (DualSense / DS4 in Android keylayout):
     // 0x134 is BUTTON_X (Square), 0x133 is BUTTON_Y (Triangle)
     // On Xbox (XInput in Android):
@@ -245,14 +299,23 @@ static void forward_state_to_uinput(const QuestHwState& s) {
     const int square_key   = isPlayStation ? 0x134 : 0x133;
     const int triangle_key = isPlayStation ? 0x133 : 0x134;
 
-    const int bit_to_key[] = {
+    const int modern_keys[] = {
         0x130, 0x131, square_key, triangle_key,
         BTN_TL, BTN_TR,
         BTN_SELECT, BTN_START, BTN_MODE,
         BTN_THUMBL, BTN_THUMBR,
         BTN_TL2, BTN_TR2
     };
-    const int n = sizeof(bit_to_key) / sizeof(bit_to_key[0]);
+    const int ds4_keys[] = {
+        0x131, 0x132, 0x130, 0x133, 0x134, 0x135,
+        0x138, 0x139, 0x13c, 0x13a, 0x13b, 0x136, 0x137, 0x13d
+    };
+    const int* bit_to_key = g_current_profile_id == 2 ? ds4_keys : modern_keys;
+    const int n = g_current_profile_id == 2 ? 14 : 13;
+    const int right_x_axis = g_current_profile_id == 2 ? ABS_Z : ABS_RX;
+    const int right_y_axis = g_current_profile_id == 2 ? ABS_RZ : ABS_RY;
+    const int left_trigger_axis = g_current_profile_id == 2 ? ABS_RX : ABS_Z;
+    const int right_trigger_axis = g_current_profile_id == 2 ? ABS_RY : ABS_RZ;
 
     bool any_written = false;
     uint32_t changed_buttons = s.buttons ^ g_last_buttons;
@@ -287,10 +350,10 @@ static void forward_state_to_uinput(const QuestHwState& s) {
 
     if (finalLx != g_last_lx) { write_event(g_fd_gamepad, EV_ABS, ABS_X, finalLx); g_last_lx = finalLx; any_written = true; }
     if (finalLy != g_last_ly) { write_event(g_fd_gamepad, EV_ABS, ABS_Y, finalLy); g_last_ly = finalLy; any_written = true; }
-    if (s.rx != g_last_rx) { write_event(g_fd_gamepad, EV_ABS, ABS_RX, s.rx); g_last_rx = s.rx; any_written = true; }
-    if (s.ry != g_last_ry) { write_event(g_fd_gamepad, EV_ABS, ABS_RY, s.ry); g_last_ry = s.ry; any_written = true; }
-    if (s.lt != g_last_lt) { write_event(g_fd_gamepad, EV_ABS, ABS_Z, s.lt); g_last_lt = s.lt; any_written = true; }
-    if (s.rt != g_last_rt) { write_event(g_fd_gamepad, EV_ABS, ABS_RZ, s.rt); g_last_rt = s.rt; any_written = true; }
+    if (s.rx != g_last_rx) { write_event(g_fd_gamepad, EV_ABS, right_x_axis, s.rx); g_last_rx = s.rx; any_written = true; }
+    if (s.ry != g_last_ry) { write_event(g_fd_gamepad, EV_ABS, right_y_axis, s.ry); g_last_ry = s.ry; any_written = true; }
+    if (s.lt != g_last_lt) { write_event(g_fd_gamepad, EV_ABS, left_trigger_axis, s.lt); g_last_lt = s.lt; any_written = true; }
+    if (s.rt != g_last_rt) { write_event(g_fd_gamepad, EV_ABS, right_trigger_axis, s.rt); g_last_rt = s.rt; any_written = true; }
     if (finalDpadX != g_last_dpadX) { write_event(g_fd_gamepad, EV_ABS, ABS_HAT0X, finalDpadX); g_last_dpadX = finalDpadX; any_written = true; }
     if (finalDpadY != g_last_dpadY) { write_event(g_fd_gamepad, EV_ABS, ABS_HAT0Y, finalDpadY); g_last_dpadY = finalDpadY; any_written = true; }
 
@@ -301,8 +364,6 @@ static void forward_state_to_uinput(const QuestHwState& s) {
 
 static inline int normalize_quest_stick(int raw) {
     int centered = raw - 32768;
-    // Deadzone (~2500 raw units, ~7% of 32768)
-    if (centered > -2500 && centered < 2500) return 0;
     if (centered < -32768) return -32768;
     if (centered > 32767) return 32767;
     return centered;
@@ -468,18 +529,18 @@ static void* quest_evdev_reader_loop(void*) {
                         LOGI("Quest HW Key: code=0x%04X val=%d -> buttons=0x%04X", ev.code, ev.value, g_hw_state.buttons);
 
                         // Quick-toggle: L3 (bit 9) + R3 (bit 10) pressed together toggles VR pointer vs Gamepad mode
-                        static bool s_both_clicked_last = false;
                         bool both_clicked = ((g_hw_state.buttons & (1 << 9)) != 0) && ((g_hw_state.buttons & (1 << 10)) != 0);
-                        if (both_clicked && !s_both_clicked_last) {
+                        if (both_clicked && !g_both_clicked_last) {
                             bool newState = !g_forwarding_enabled.load();
                             g_forwarding_enabled.store(newState);
                             LOGI(">>> L3 + R3 QUICK TOGGLE: Gamepad Forwarding is now %s <<<", newState ? "ACTIVE" : "PAUSED (VR laser pointer mode)");
                             if (!newState && g_fd_gamepad >= 0) {
                                 QuestHwState neutral;
-                                forward_state_to_uinput(neutral);
+                                forward_state_to_uinput(neutral, true);
+                                write_motion_frame(0, 0, 0, 0, 0, 0);
                             }
                         }
-                        s_both_clicked_last = both_clicked;
+                        g_both_clicked_last = both_clicked;
                     } else if (ev.code == BTN_DPAD_UP) {
                         if (ev.value != 0) g_hw_state.dpadY = -1;
                         else if (g_hw_state.dpadY == -1) g_hw_state.dpadY = 0;
@@ -518,14 +579,14 @@ static void* quest_evdev_reader_loop(void*) {
                             int val = (ev.value * 255) / 1023;
                             if (val < 0) val = 0; if (val > 255) val = 255;
                             g_hw_state.lt = val;
-                            if (val > 30) g_hw_state.buttons |= (1 << 11);
+                            if (val >= 217) g_hw_state.buttons |= (1 << 11);
                             else g_hw_state.buttons &= ~(1 << 11);
                             state_changed = true;
                         } else if (ev.code == ABS_RZ || ev.code == ABS_GAS) {
                             int val = (ev.value * 255) / 1023;
                             if (val < 0) val = 0; if (val > 255) val = 255;
                             g_hw_state.rt = val;
-                            if (val > 30) g_hw_state.buttons |= (1 << 12);
+                            if (val >= 217) g_hw_state.buttons |= (1 << 12);
                             else g_hw_state.buttons &= ~(1 << 12);
                             state_changed = true;
                         } else if (ev.code == ABS_HAT0X) {
@@ -548,7 +609,7 @@ static void* quest_evdev_reader_loop(void*) {
                                 int val = (ev.value * 255) / 1023;
                                 if (val < 0) val = 0; if (val > 255) val = 255;
                                 g_hw_state.rt = val;
-                                if (val > 30) g_hw_state.buttons |= (1 << 12);
+                                if (val >= 217) g_hw_state.buttons |= (1 << 12);
                                 else g_hw_state.buttons &= ~(1 << 12);
                                 state_changed = true;
                             } else if (ev.code == ABS_RZ) {
@@ -569,7 +630,7 @@ static void* quest_evdev_reader_loop(void*) {
                                 int val = (ev.value * 255) / 1023;
                                 if (val < 0) val = 0; if (val > 255) val = 255;
                                 g_hw_state.lt = val;
-                                if (val > 30) g_hw_state.buttons |= (1 << 11);
+                                if (val >= 217) g_hw_state.buttons |= (1 << 11);
                                 else g_hw_state.buttons &= ~(1 << 11);
                                 state_changed = true;
                             } else if (ev.code == ABS_RZ) {
@@ -580,10 +641,6 @@ static void* quest_evdev_reader_loop(void*) {
                             }
                         }
                     }
-                    pthread_mutex_unlock(&g_state_mutex);
-                } else if (ev.type == EV_SYN) {
-                    pthread_mutex_lock(&g_state_mutex);
-                    forward_state_to_uinput(g_hw_state);
                     pthread_mutex_unlock(&g_state_mutex);
                 }
             }
@@ -598,6 +655,7 @@ static void* quest_evdev_reader_loop(void*) {
 }
 
 static void start_quest_reader() {
+    if (!g_quest_input_enabled) return;
     if (g_reader_running.load()) return;
     g_reader_running.store(true);
     pthread_create(&g_reader_thread, nullptr, quest_evdev_reader_loop, nullptr);
@@ -613,6 +671,12 @@ static void destroy_devices() {
     stop_quest_reader();
 
     bool destroyed = false;
+    if (g_fd_sensors >= 0) {
+        ioctl(g_fd_sensors, UI_DEV_DESTROY);
+        close(g_fd_sensors);
+        g_fd_sensors = -1;
+        destroyed = true;
+    }
     if (g_fd_gamepad >= 0) {
         ioctl(g_fd_gamepad, UI_DEV_DESTROY);
         close(g_fd_gamepad);
@@ -642,11 +706,13 @@ static void destroy_devices() {
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_questgamepad_android_uinput_UInputNative_createDevice(JNIEnv*, jclass, jint profileId) {
     const gamepad_profile* prof = find_profile(profileId);
-    g_current_profile_id = profileId;
     LOGI("createDevice: profile=%d (VID=0x%04X PID=0x%04X name=\"%s\")",
          prof->id, prof->vid, prof->pid, prof->name);
 
     destroy_devices();
+    g_current_profile_id = profileId;
+    g_hw_state = QuestHwState{};
+    g_both_clicked_last = false;
     g_last_buttons = 0xFFFFFFFF;
     g_last_lx = 999999; g_last_ly = 999999;
     g_last_rx = 999999; g_last_ry = 999999;
@@ -685,11 +751,8 @@ Java_com_questgamepad_android_uinput_UInputNative_createDevice(JNIEnv*, jclass, 
 
     {
         const int btns[] = {
-            BTN_A, BTN_B, BTN_X, BTN_Y,
-            BTN_TL, BTN_TR,
-            BTN_SELECT, BTN_START, BTN_MODE,
-            BTN_THUMBL, BTN_THUMBR,
-            BTN_TL2, BTN_TR2
+            0x130, 0x131, 0x132, 0x133, 0x134, 0x135, 0x136,
+            0x137, 0x138, 0x139, 0x13a, 0x13b, 0x13c, 0x13d, 0x13e
         };
         for (int b : btns) {
             if (set_bit_or_log(fd, UI_SET_KEYBIT, b, "KEY") < 0) goto fail;
@@ -698,10 +761,10 @@ Java_com_questgamepad_android_uinput_UInputNative_createDevice(JNIEnv*, jclass, 
 
     if (setup_abs(fd, ABS_X,        STICK_MIN, STICK_MAX, 16, 128) < 0) goto fail;
     if (setup_abs(fd, ABS_Y,        STICK_MIN, STICK_MAX, 16, 128) < 0) goto fail;
-    if (setup_abs(fd, ABS_RX,       STICK_MIN, STICK_MAX, 16, 128) < 0) goto fail;
-    if (setup_abs(fd, ABS_RY,       STICK_MIN, STICK_MAX, 16, 128) < 0) goto fail;
-    if (setup_abs(fd, ABS_Z,        TRIG_MIN,  TRIG_MAX,   0,   0) < 0) goto fail;
-    if (setup_abs(fd, ABS_RZ,       TRIG_MIN,  TRIG_MAX,   0,   0) < 0) goto fail;
+    if (setup_abs(fd, profileId == 2 ? ABS_Z : ABS_RX, STICK_MIN, STICK_MAX, 16, 128) < 0) goto fail;
+    if (setup_abs(fd, profileId == 2 ? ABS_RZ : ABS_RY, STICK_MIN, STICK_MAX, 16, 128) < 0) goto fail;
+    if (setup_abs(fd, profileId == 2 ? ABS_RX : ABS_Z, TRIG_MIN, TRIG_MAX, 0, 0) < 0) goto fail;
+    if (setup_abs(fd, profileId == 2 ? ABS_RY : ABS_RZ, TRIG_MIN, TRIG_MAX, 0, 0) < 0) goto fail;
     if (setup_abs(fd, ABS_HAT0X,    HAT_MIN,   HAT_MAX,    0,   0) < 0) goto fail;
     if (setup_abs(fd, ABS_HAT0Y,    HAT_MIN,   HAT_MAX,    0,   0) < 0) goto fail;
 
@@ -714,6 +777,10 @@ Java_com_questgamepad_android_uinput_UInputNative_createDevice(JNIEnv*, jclass, 
     LOGI("Virtual gamepad created (profile=%d), fd=%d", prof->id, fd);
     g_fd_gamepad = fd;
 
+    if (profileId == 2 || profileId == 3) {
+        g_fd_sensors = create_sensors_fd(*prof);
+        if (g_fd_sensors < 0) LOGW("Sony motion sensor device unavailable");
+    }
     g_fd_mouse = create_mouse_fd(prof->vid, (uint16_t)(prof->pid + 0x100));
     g_fd_kbd = create_keyboard_fd(prof->vid, (uint16_t)(prof->pid + 0x200), false);
     LOGI("Gamepad devices ready — gamepad=%d, mouse=%d, kbd=%d", g_fd_gamepad, g_fd_mouse, g_fd_kbd);
@@ -735,40 +802,26 @@ Java_com_questgamepad_android_uinput_UInputNative_sendFrame(
         jint lx, jint ly, jint rx, jint ry,
         jint lt, jint rt,
         jint dpadX, jint dpadY) {
-    if (g_fd_gamepad < 0) return;
-
-    static const int bit_to_key[] = {
-        BTN_A, BTN_B, BTN_X, BTN_Y,
-        BTN_TL, BTN_TR,
-        BTN_SELECT, BTN_START, BTN_MODE,
-        BTN_THUMBL, BTN_THUMBR,
-        BTN_TL2, BTN_TR2
-    };
-    const int n = sizeof(bit_to_key) / sizeof(bit_to_key[0]);
-    for (int i = 0; i < n; i++) {
-        int pressed = (buttons >> i) & 1;
-        write_event(g_fd_gamepad, EV_KEY, bit_to_key[i], pressed);
-    }
-
-    write_event(g_fd_gamepad, EV_ABS, ABS_X,     lx);
-    write_event(g_fd_gamepad, EV_ABS, ABS_Y,     ly);
-    write_event(g_fd_gamepad, EV_ABS, ABS_RX,    rx);
-    write_event(g_fd_gamepad, EV_ABS, ABS_RY,    ry);
-    write_event(g_fd_gamepad, EV_ABS, ABS_Z,     lt);
-    write_event(g_fd_gamepad, EV_ABS, ABS_RZ,    rt);
-    write_event(g_fd_gamepad, EV_ABS, ABS_HAT0X, dpadX);
-    write_event(g_fd_gamepad, EV_ABS, ABS_HAT0Y, dpadY);
-
-    write_event(g_fd_gamepad, EV_SYN, SYN_REPORT, 0);
+    pthread_mutex_lock(&g_state_mutex);
+    QuestHwState output;
+    output.buttons = buttons;
+    output.lx = lx; output.ly = ly; output.rx = rx; output.ry = ry;
+    output.lt = lt; output.rt = rt;
+    output.dpadX = dpadX; output.dpadY = dpadY;
+    forward_state_to_uinput(output);
+    pthread_mutex_unlock(&g_state_mutex);
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_questgamepad_android_uinput_UInputNative_sendMotionFrame(
         JNIEnv*, jclass,
-        jint /*gyroX*/, jint /*gyroY*/, jint /*gyroZ*/,
-        jint /*accelX*/, jint /*accelY*/, jint /*accelZ*/) {
-    if (g_fd_gamepad < 0) return;
-    write_event(g_fd_gamepad, EV_SYN, SYN_REPORT, 0);
+        jint gyroX, jint gyroY, jint gyroZ,
+        jint accelX, jint accelY, jint accelZ) {
+    pthread_mutex_lock(&g_state_mutex);
+    if (g_forwarding_enabled.load() && !g_system_paused.load()) {
+        write_motion_frame(gyroX, gyroY, gyroZ, accelX, accelY, accelZ);
+    }
+    pthread_mutex_unlock(&g_state_mutex);
 }
 
 extern "C" JNIEXPORT jintArray JNICALL
@@ -845,6 +898,7 @@ Java_com_questgamepad_android_uinput_UInputNative_pollFFEvent(JNIEnv* env, jclas
 extern "C" JNIEXPORT void JNICALL
 Java_com_questgamepad_android_uinput_UInputNative_sendMouseFrame(
         JNIEnv*, jclass, jint relX, jint relY, jint scrollY, jint keys) {
+    if (!g_forwarding_enabled.load() || g_system_paused.load()) return;
     const int mouse_bits = keys & ((1 << 16) | (1 << 17) | (1 << 18));
     const int kbd_bits   = keys & ((1 << MOUSE_KEY_COUNT) - 1);
 
@@ -879,12 +933,41 @@ Java_com_questgamepad_android_uinput_UInputNative_sendMouseFrame(
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_questgamepad_android_uinput_UInputNative_setForwardingEnabled(JNIEnv*, jclass, jboolean enabled) {
-    g_forwarding_enabled.store(enabled);
-    if (!enabled && g_fd_gamepad >= 0) {
+    pthread_mutex_lock(&g_state_mutex);
+    g_system_paused.store(!enabled);
+    if (!enabled) {
         QuestHwState neutral;
-        forward_state_to_uinput(neutral);
+        forward_state_to_uinput(neutral, true);
+        write_motion_frame(0, 0, 0, 0, 0, 0);
     }
+    pthread_mutex_unlock(&g_state_mutex);
     LOGI("Native forwarding enabled set to: %d", enabled ? 1 : 0);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_questgamepad_android_uinput_UInputNative_setQuestInputEnabled(JNIEnv*, jclass, jboolean enabled) {
+    stop_quest_reader();
+    g_quest_input_enabled = enabled;
+    g_forwarding_enabled.store(true);
+    g_system_paused.store(enabled);
+    g_hw_state = QuestHwState{};
+}
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_questgamepad_android_uinput_UInputNative_readQuestState(JNIEnv* env, jclass) {
+    pthread_mutex_lock(&g_state_mutex);
+    const auto& state = g_hw_state;
+    jint values[] = {
+        state.lx, state.ly, state.rx, state.ry, state.lt, state.rt,
+        static_cast<jint>(state.buttons), state.dpadX, state.dpadY,
+        state.left_thumbrest ? 1 : 0,
+        g_forwarding_enabled.load() && !g_system_paused.load() ? 1 : 0,
+        g_fd_sensors >= 0 ? 1 : 0
+    };
+    pthread_mutex_unlock(&g_state_mutex);
+    jintArray result = env->NewIntArray(12);
+    if (result) env->SetIntArrayRegion(result, 0, 12, values);
+    return result;
 }
 
 extern "C" JNIEXPORT void JNICALL

@@ -55,7 +55,7 @@ class DebugActivity : AppCompatActivity() {
                     binding.tvPollRate.text = "$currentFps Hz"
                 }
 
-                // If service is running or test mode is on, update visualizer & telemetry
+                sampleState.copyFrom(QuestGamepadService.latestState)
                 binding.debugVisualizer.updateState(sampleState)
 
                 val logText = buildString {
@@ -63,6 +63,7 @@ class DebugActivity : AppCompatActivity() {
                     appendLine("Source:       ${prefs.inputSource.displayName}")
                     appendLine("Target:       ${prefs.targetProfile.displayName}")
                     appendLine("Service:      ${if (QuestGamepadService.isRunning) "RUNNING" else "STOPPED"}")
+                    appendLine("Forwarding:   ${if (QuestGamepadService.isForwarding) "ACTIVE" else "PAUSED"}")
                     appendLine()
                     appendLine("── ANALOG AXES ──")
                     appendLine("Left Stick:   X=${sampleState.leftStickX}  Y=${sampleState.leftStickY}")
@@ -70,7 +71,8 @@ class DebugActivity : AppCompatActivity() {
                     appendLine("Triggers:     L2=${sampleState.leftTrigger}/255  R2=${sampleState.rightTrigger}/255")
                     appendLine("D-Pad Hat:    X=${sampleState.dpadX}  Y=${sampleState.dpadY}")
                     appendLine()
-                    appendLine("── 6DoF MOTION (DUALSENSE IMU) ──")
+                    appendLine("── MOTION (GYRO / ACCEL) ──")
+                    appendLine("Tracking:     ${if (sampleState.motionTracked) "LIVE" else "NO POSE SOURCE"}")
                     appendLine("Gyro:         X=${sampleState.gyroX} Y=${sampleState.gyroY} Z=${sampleState.gyroZ}")
                     appendLine("Accel:        X=${sampleState.accelX} Y=${sampleState.accelY} Z=${sampleState.accelZ}")
                     appendLine()

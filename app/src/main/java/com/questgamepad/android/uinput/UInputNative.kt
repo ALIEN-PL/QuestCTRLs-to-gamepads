@@ -21,5 +21,7 @@ object UInputNative {
     @JvmStatic external fun sendMouseFrame(relX: Int, relY: Int, scrollY: Int, keys: Int)
     @JvmStatic external fun pollFFEvent(): IntArray?
     @JvmStatic external fun setForwardingEnabled(enabled: Boolean)
+    @JvmStatic external fun setQuestInputEnabled(enabled: Boolean)
+    @JvmStatic external fun readQuestState(): IntArray
     @JvmStatic external fun destroy()
 }

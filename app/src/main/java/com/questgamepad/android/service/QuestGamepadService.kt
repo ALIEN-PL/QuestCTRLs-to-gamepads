@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -15,9 +16,9 @@ import com.questgamepad.android.MainActivity
 import com.questgamepad.android.Prefs
 import com.questgamepad.android.input.aggregator.QuestControllerAggregator
 import com.questgamepad.android.input.model.QuestControllerType
+import com.questgamepad.android.input.model.UnifiedGamepadState
 import com.questgamepad.android.input.provider.GenericGamepadInputProvider
 import com.questgamepad.android.input.provider.InputProvider
-import com.questgamepad.android.input.provider.NetworkStreamingProvider
 import com.questgamepad.android.input.provider.QuestVrInputProvider
 import com.questgamepad.android.input.provider.SteamControllerInputProvider
 import com.questgamepad.android.uinput.GamepadProfile
@@ -39,15 +40,29 @@ class QuestGamepadService : Service() {
 
         @Volatile var isRunning = false
             private set
+        @Volatile var latestState = UnifiedGamepadState()
+            private set
+        @Volatile var isForwarding = false
+            private set
     }
 
     private lateinit var prefs: Prefs
     private var uinputGamepad: UInputGamepad? = null
     private var activeProvider: InputProvider? = null
+    private var screenshotHeld = false
+    private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == "input_source" && isRunning) {
+            stopPipeline()
+            startServicePipeline()
+        } else {
+            (activeProvider as? QuestVrInputProvider)?.refreshPreferences(prefs)
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
         prefs = Prefs(this)
+        prefs.registerChangeListener(preferenceListener)
         createNotificationChannel()
     }
 
@@ -105,7 +120,7 @@ class QuestGamepadService : Service() {
         // Select and instantiate active input provider
         val provider: InputProvider = when (prefs.inputSource) {
             QuestControllerType.QUEST_2, QuestControllerType.QUEST_3, QuestControllerType.QUEST_PRO -> {
-                QuestVrInputProvider(this, prefs.inputSource, aggregator)
+                QuestVrInputProvider(this, prefs.inputSource, aggregator, uinput::readQuestState)
             }
             QuestControllerType.STEAM_CONTROLLER -> {
                 SteamControllerInputProvider()
@@ -124,12 +139,12 @@ class QuestGamepadService : Service() {
             provider.sendHapticFeedback(scaledStrong, scaledWeak)
         }
 
-        // Start reading input frames and pumping them into uinput only for external providers
-        // (For Quest Touch controllers, the native C++ hardware evdev reader in Shizuku handles this directly with zero latency)
-        if (prefs.inputSource == QuestControllerType.STEAM_CONTROLLER || prefs.inputSource == QuestControllerType.GENERIC_GAMEPAD) {
-            provider.start { state ->
-                uinput.sendFrame(state)
-            }
+        provider.start { state ->
+            latestState = state.copy()
+            isForwarding = uinput.readQuestState()?.getOrNull(10) == 1
+            if (isForwarding && state.screenshotPressed && !screenshotHeld) uinput.takeScreenshot()
+            screenshotHeld = state.screenshotPressed
+            uinput.sendFrame(state)
         }
 
         updateNotification()
@@ -204,12 +219,20 @@ class QuestGamepadService : Service() {
 
     override fun onDestroy() {
         Log.i(TAG, "QuestGamepadService destroying...")
+        prefs.unregisterChangeListener(preferenceListener)
+        stopPipeline()
+        super.onDestroy()
+    }
+
+    private fun stopPipeline() {
         isRunning = false
+        isForwarding = false
+        latestState = UnifiedGamepadState()
+        screenshotHeld = false
         activeProvider?.stop()
         activeProvider = null
         uinputGamepad?.stop()
         uinputGamepad = null
-        super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

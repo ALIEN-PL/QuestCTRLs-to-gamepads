@@ -41,7 +41,8 @@ data class SingleControllerState(
     var gyroZ: Float = 0f,
     var accelX: Float = 0f,
     var accelY: Float = 0f,
-    var accelZ: Float = 0f
+    var accelZ: Float = 0f,
+    var motionTimestampNs: Long = 0L
 )
 
 data class RawQuestControllerState(

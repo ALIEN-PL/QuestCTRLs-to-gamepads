@@ -5,7 +5,10 @@ import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.util.Log
+import com.questgamepad.android.Prefs
 import com.questgamepad.android.input.aggregator.QuestControllerAggregator
+import com.questgamepad.android.input.aggregator.ControllerPose
+import com.questgamepad.android.input.aggregator.VirtualControllerMotion
 import com.questgamepad.android.input.model.QuestControllerType
 import com.questgamepad.android.input.model.RawQuestControllerState
 import com.questgamepad.android.input.model.UnifiedGamepadState
@@ -13,7 +16,8 @@ import com.questgamepad.android.input.model.UnifiedGamepadState
 class QuestVrInputProvider(
     private val context: Context,
     override val deviceType: QuestControllerType = QuestControllerType.QUEST_3,
-    val aggregator: QuestControllerAggregator = QuestControllerAggregator()
+    val aggregator: QuestControllerAggregator = QuestControllerAggregator(),
+    private val readHardwareState: (() -> IntArray?)? = null
 ) : InputProvider {
 
     private val TAG = "QuestVrInputProvider"
@@ -25,6 +29,7 @@ class QuestVrInputProvider(
 
     val rawState = RawQuestControllerState(deviceType = deviceType)
     private val unifiedState = UnifiedGamepadState(sourceDevice = deviceType)
+    private val virtualMotion = VirtualControllerMotion()
 
     private val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
 
@@ -45,7 +50,37 @@ class QuestVrInputProvider(
 
                 // Aggregate raw state into unified gamepad state
                 synchronized(rawState) {
-                    aggregator.aggregate(rawState, unifiedState)
+                    if (readHardwareState != null) {
+                        val hardware = readHardwareState.invoke()
+                        if (hardware == null || hardware.size < 11 || hardware[10] == 0) {
+                            unifiedState.buttons = 0
+                            unifiedState.screenshotPressed = false
+                            unifiedState.leftStickX = 0
+                            unifiedState.leftStickY = 0
+                            unifiedState.rightStickX = 0
+                            unifiedState.rightStickY = 0
+                            unifiedState.leftTrigger = 0
+                            unifiedState.rightTrigger = 0
+                            unifiedState.dpadX = 0
+                            unifiedState.dpadY = 0
+                            unifiedState.motionTracked = false
+                            unifiedState.gyroX = 0
+                            unifiedState.gyroY = 0
+                            unifiedState.gyroZ = 0
+                            unifiedState.accelX = 0
+                            unifiedState.accelY = 0
+                            unifiedState.accelZ = 0
+                            rawState.right.motionTimestampNs = 0L
+                            virtualMotion.reset()
+                        } else {
+                            updateHardwareState(hardware)
+                            aggregator.aggregate(rawState, unifiedState)
+                            if (unifiedState.dpadX == 0) unifiedState.dpadX = hardware[7]
+                            if (unifiedState.dpadY == 0) unifiedState.dpadY = hardware[8]
+                        }
+                    } else {
+                        aggregator.aggregate(rawState, unifiedState)
+                    }
                 }
 
                 callback?.invoke(unifiedState)
@@ -73,8 +108,44 @@ class QuestVrInputProvider(
     override fun stop() {
         isRunning = false
         workerThread?.interrupt()
+        workerThread?.join(1000)
         workerThread = null
         callback = null
+    }
+
+    fun refreshPreferences(prefs: Prefs) {
+        synchronized(rawState) {
+            aggregator.mappings = prefs.loadMappings()
+            aggregator.leftCalibration = prefs.getLeftStickCalibration()
+            aggregator.rightCalibration = prefs.getRightStickCalibration()
+            aggregator.dpadThreshold = prefs.dpadThreshold
+            aggregator.enableGyroAiming = prefs.gyroAimingEnabled
+            aggregator.gyroSensitivity = prefs.gyroSensitivity
+        }
+    }
+
+    private fun updateHardwareState(hardware: IntArray) {
+        rawState.left.stickX = hardware[0] / 32767f
+        rawState.left.stickY = -hardware[1] / 32767f
+        rawState.right.stickX = hardware[2] / 32767f
+        rawState.right.stickY = -hardware[3] / 32767f
+        rawState.left.trigger = hardware[4] / 255f
+        rawState.right.trigger = hardware[5] / 255f
+        val buttons = hardware[6]
+        rawState.right.buttonPrimaryClick = buttons and (1 shl 0) != 0
+        rawState.right.buttonSecondaryClick = buttons and (1 shl 1) != 0
+        rawState.left.buttonPrimaryClick = buttons and (1 shl 2) != 0
+        rawState.left.buttonSecondaryClick = buttons and (1 shl 3) != 0
+        rawState.left.gripClick = buttons and (1 shl 4) != 0
+        rawState.right.gripClick = buttons and (1 shl 5) != 0
+        rawState.left.systemButtonClick = buttons and (1 shl 6) != 0
+        rawState.right.systemButtonClick = buttons and ((1 shl 7) or (1 shl 8)) != 0
+        val bothSticks = buttons and ((1 shl 9) or (1 shl 10)) == ((1 shl 9) or (1 shl 10))
+        rawState.left.stickClick = !bothSticks && buttons and (1 shl 9) != 0
+        rawState.right.stickClick = !bothSticks && buttons and (1 shl 10) != 0
+        rawState.left.triggerClick = buttons and (1 shl 11) != 0
+        rawState.right.triggerClick = buttons and (1 shl 12) != 0
+        rawState.left.thumbrestTouch = hardware[9] != 0
     }
 
     override fun sendHapticFeedback(strongMagnitude: Int, weakMagnitude: Int) {
@@ -185,12 +256,35 @@ class QuestVrInputProvider(
         accelX: Float, accelY: Float, accelZ: Float
     ) {
         synchronized(rawState) {
+            if (!floatArrayOf(gyroX, gyroY, gyroZ, accelX, accelY, accelZ).all { it.isFinite() }) {
+                rawState.right.motionTimestampNs = 0L
+                return
+            }
             rawState.right.gyroX = gyroX
             rawState.right.gyroY = gyroY
             rawState.right.gyroZ = gyroZ
             rawState.right.accelX = accelX
             rawState.right.accelY = accelY
             rawState.right.accelZ = accelZ
+            rawState.right.motionTimestampNs = System.nanoTime()
+        }
+    }
+
+    fun updateControllerPoses(timestampNs: Long, left: ControllerPose, right: ControllerPose): Boolean {
+        synchronized(rawState) {
+            if (System.nanoTime() - timestampNs !in 0L..100_000_000L) {
+                virtualMotion.reset()
+                rawState.right.motionTimestampNs = 0L
+                return false
+            }
+            val motion = virtualMotion.update(timestampNs, left, right)
+            if (motion == null) {
+                rawState.right.motionTimestampNs = 0L
+                return false
+            }
+            updateMotion(motion.gyro.x.toFloat(), motion.gyro.y.toFloat(), motion.gyro.z.toFloat(),
+                motion.acceleration.x.toFloat(), motion.acceleration.y.toFloat(), motion.acceleration.z.toFloat())
+            return true
         }
     }
 }

@@ -11,8 +11,8 @@ android {
         applicationId = "com.questgamepad.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
@@ -49,6 +49,8 @@ android {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
+    implementation("org.apache.commons:commons-math3:3.6.1")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)

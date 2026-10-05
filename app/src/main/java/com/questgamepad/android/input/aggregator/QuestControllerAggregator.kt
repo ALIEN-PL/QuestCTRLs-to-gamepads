@@ -63,6 +63,7 @@ class QuestControllerAggregator(
         var dpadDown = false
         var dpadLeft = false
         var dpadRight = false
+        var screenshotPressed = false
 
         // Check if D-pad modifier is active from any mapped button
         for ((source, target) in mappings) {
@@ -79,6 +80,10 @@ class QuestControllerAggregator(
             if (!pressed) continue
 
             if (target.isDpadModifier) continue
+            if (target == TargetGamepadButton.SCREENSHOT) {
+                screenshotPressed = true
+                continue
+            }
 
             if (target.mask > 0) {
                 // If modifier is active and this is a face button, translate to D-Pad!
@@ -141,11 +146,17 @@ class QuestControllerAggregator(
         // Triggers (Index finger)
         var ltVal = (raw.left.trigger * TRIG_SCALE).toInt().coerceIn(0, 255)
         var rtVal = (raw.right.trigger * TRIG_SCALE).toInt().coerceIn(0, 255)
+        val leftTriggerMapping = mappings[QuestSourceButton.LEFT_TRIGGER]
+        val rightTriggerMapping = mappings[QuestSourceButton.RIGHT_TRIGGER]
+        if (leftTriggerMapping != null && leftTriggerMapping != TargetGamepadButton.L2_TRIGGER_FULL) ltVal = 0
+        if (rightTriggerMapping != null && rightTriggerMapping != TargetGamepadButton.R2_TRIGGER_FULL) rtVal = 0
         if (forceLeftTrigger) ltVal = 255
         if (forceRightTrigger) rtVal = 255
 
+        val motionAge = System.nanoTime() - raw.right.motionTimestampNs
+        val motionTracked = raw.right.motionTimestampNs > 0L && motionAge in 0L..100_000_000L
         // Gyro aiming: right controller angular velocity added to right stick or motion frame
-        if (enableGyroAiming && raw.right.isConnected) {
+        if (enableGyroAiming && raw.right.isConnected && motionTracked) {
             val gyroDeltaX = (raw.right.gyroY * gyroSensitivity * 1000f).toInt()
             val gyroDeltaY = (-raw.right.gyroX * gyroSensitivity * 1000f).toInt()
             finalRx = (finalRx + gyroDeltaX).coerceIn(-32768, 32767)
@@ -154,6 +165,7 @@ class QuestControllerAggregator(
 
         // Fill output
         output.buttons = buttonsMask
+        output.screenshotPressed = screenshotPressed
         output.leftStickX = finalLx
         output.leftStickY = finalLy
         output.rightStickX = finalRx
@@ -164,12 +176,13 @@ class QuestControllerAggregator(
         output.dpadY = dpadHatY
 
         // Motion 6-axis data (scaled for DualSense IMU)
-        output.gyroX = (raw.right.gyroX * 1000f).toInt()
-        output.gyroY = (raw.right.gyroY * 1000f).toInt()
-        output.gyroZ = (raw.right.gyroZ * 1000f).toInt()
-        output.accelX = (raw.right.accelX * 1000f).toInt()
-        output.accelY = (raw.right.accelY * 1000f).toInt()
-        output.accelZ = (raw.right.accelZ * 1000f).toInt()
+        output.motionTracked = motionTracked
+        output.gyroX = if (motionTracked) (raw.right.gyroX * 1000f).toInt() else 0
+        output.gyroY = if (motionTracked) (raw.right.gyroY * 1000f).toInt() else 0
+        output.gyroZ = if (motionTracked) (raw.right.gyroZ * 1000f).toInt() else 0
+        output.accelX = if (motionTracked) (raw.right.accelX * 1000f).toInt() else 0
+        output.accelY = if (motionTracked) (raw.right.accelY * 1000f).toInt() else 0
+        output.accelZ = if (motionTracked) (raw.right.accelZ * 1000f).toInt() else 0
 
         output.batteryLeft = raw.left.batteryPercent
         output.batteryRight = raw.right.batteryPercent
