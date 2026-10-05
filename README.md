@@ -1,5 +1,5 @@
 # QuestCTRLs to Gamepads (Virtual DualSense & Xbox for Meta Quest)
-# AT THE MOMENT CAN'T PASS 1st level due to lack of gyro dualshock/dualsense emulation. WIP.
+# AT THE MOMENT CAN'T PASS 1st level on Astro Quest (Astro bot rescue mission ps4/openxr emulation) due to lack of gyro dualshock/dualsense emulation. WIP.
 > **Fork Information:**  
 > This project is a fork of the excellent [SteamController-Android](https://github.com/SonicDX12/SteamController-Android) created by [Kevin (SonicDX12)](https://github.com/SonicDX12).  
 > While the upstream project focused on Valve Steam Controller support over USB OTG/BLE, this fork massively expands the architecture to natively support **Meta Quest VR controllers (Quest 2, Quest 3 / 3S, Quest Pro)** as high-performance virtual gamepads on **Meta Horizon OS** (Android) via Linux `/dev/uinput` and Shizuku. Steam Controller and generic gamepad modes remain fully supported.
