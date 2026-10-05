@@ -10,22 +10,26 @@
 # Java class files
 *.class
 
-# Generated files
+# Generated & build files
 bin/
 gen/
 out/
 release/
-
-# Gradle files
-.gradle/
 build/
 /build
+app/build/
 /captures
 .externalNativeBuild
 .cxx
+.cxx/
+app/.cxx/
+
+# Gradle files
+.gradle/
 
 # Local configuration file (sdk path, etc)
 local.properties
+/local.properties
 
 # Android Studio / IntelliJ
 *.iml
@@ -41,19 +45,19 @@ local.properties
 keystore.properties
 keystore/
 
-# Mac
+# OS specific files
 .DS_Store
-
-# Windows
 Thumbs.db
 desktop.ini
 
 # Logs
 *.log
 
-# Tooling artifacts
-.cxx/
+# Release artifacts (created locally)
+source-code.zip
+*.zip
+app-debug.apk
 
-# Claude Code workspace metadata (private)
+# Tooling metadata
 .claude/
 CLAUDE.md

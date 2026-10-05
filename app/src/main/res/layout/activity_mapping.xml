@@ -1,61 +1,68 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-  MappingActivity (phone) — V1.2 redesign.
-  Rows show: [source SC button icon] name  →  [target colored icon] target name (chevron)
-  Tapping anywhere on a row opens the remap dialog. The earlier SC2026 diagram has
-  been removed: a top-view drawing can't show back paddles / grips meaningfully,
-  so it added confusion more than utility.
--->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
-    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:fitsSystemWindows="true"
     android:orientation="vertical"
-    android:background="?attr/colorSurface">
+    android:background="#12161E"
+    android:padding="16dp">
 
-    <com.google.android.material.appbar.AppBarLayout
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbarMapping"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="?attr/colorSurface">
+        app:title="Button Mapping"
+        app:titleTextColor="#FFFFFF"
+        app:navigationIcon="@drawable/ic_chevron_down"
+        app:navigationIconTint="#FFFFFF"
+        android:layout_marginBottom="8dp" />
 
-        <com.google.android.material.appbar.MaterialToolbar
-            android:id="@+id/toolbar"
-            android:layout_width="match_parent"
-            android:layout_height="?attr/actionBarSize"
-            android:background="?attr/colorSurface"
-            app:title="@string/mapping_title"
-            app:titleTextColor="?attr/colorPrimary"
-            app:navigationIcon="@android:drawable/ic_menu_close_clear_cancel"
-            app:navigationIconTint="?attr/colorPrimary"
-            app:menu="@menu/menu_mapping" />
-    </com.google.android.material.appbar.AppBarLayout>
-
-    <ScrollView
+    <!-- D-Pad Tip Card -->
+    <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
-        android:layout_height="match_parent">
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        app:cardCornerRadius="14dp"
+        app:cardBackgroundColor="#1A2A38"
+        app:strokeColor="#2A475E"
+        app:strokeWidth="1dp">
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="20dp">
+            android:padding="12dp">
 
             <TextView
-                android:layout_width="match_parent"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/mapping_hint"
-                android:textColor="?attr/colorOnSurfaceVariant"
+                android:text="💡 D-Pad Modifier Mode Active"
+                android:textColor="#66C0F4"
                 android:textSize="13sp"
-                android:layout_marginBottom="20dp" />
+                android:textStyle="bold" />
 
-            <LinearLayout
-                android:id="@+id/mappingContainer"
-                android:layout_width="match_parent"
+            <TextView
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:orientation="vertical" />
+                android:text="Quest controllers lack physical D-Pads. Holding Left Thumbrest or Grip transforms Left Stick and X/Y/A/B buttons directly into D-Pad Up/Down/Left/Right."
+                android:textColor="#C6D4DF"
+                android:textSize="12sp"
+                android:layout_marginTop="2dp" />
         </LinearLayout>
-    </ScrollView>
+    </com.google.android.material.card.MaterialCardView>
 
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/rvMappings"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnResetDefaultMapping"
+        style="@style/Widget.Material3.Button.TonalButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Reset to Recommended Default Mapping"
+        android:layout_marginTop="12dp" />
 </LinearLayout>

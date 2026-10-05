@@ -13,5 +13,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "SteamControllerAndroid"
+rootProject.name = "QuestToGamepad"
 include(":app")

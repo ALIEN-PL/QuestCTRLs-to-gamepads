@@ -1,6 +1,6 @@
-// Virtual Xbox 360 gamepad via Linux uinput.
-// Must run with a UID that has SELinux permission to open /dev/uinput
-// (typically shell via Shizuku, or root). Plain app UID will be denied.
+// Virtual Gamepad via Linux uinput for Meta Quest & Steam Controller
+// Supports Sony DualSense (PS5), DualShock 4 (PS4), Xbox 360, Xbox One, Desktop Mouse/Kbd.
+// Automatically reads hardware Quest 2, 3, Pro controllers directly via evdev (/dev/input/event*).
 
 #include <jni.h>
 #include <android/log.h>
@@ -12,12 +12,16 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
+#include <poll.h>
+#include <dirent.h>
+#include <pthread.h>
+#include <atomic>
 
-#define LOG_TAG "uinput_jni"
+#define LOG_TAG "quest_uinput_jni"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// Gamepad profiles — VID/PID/name selected at create time
 struct gamepad_profile {
     int id;
     uint16_t vid;
@@ -29,12 +33,11 @@ struct gamepad_profile {
 static const gamepad_profile PROFILES[] = {
     { 0, 0x045E, 0x028E, "Microsoft X-Box 360 pad",                                           false }, // XBOX_360
     { 1, 0x045E, 0x02EA, "Microsoft Xbox One Controller",                                     false }, // XBOX_ONE
-    { 2, 0x054C, 0x05C4, "Sony Interactive Entertainment Wireless Controller",                false }, // DS4
-    { 3, 0x054C, 0x0CE6, "Sony Interactive Entertainment DualSense Wireless Controller",      false }, // DualSense
-    { 4, 0x046D, 0xC077, "Steam Controller Desktop",                                          true  }, // MOUSE
+    { 2, 0x054C, 0x05C4, "Sony Interactive Entertainment Wireless Controller",                false }, // DUALSHOCK_4
+    { 3, 0x054C, 0x0CE6, "Sony Interactive Entertainment DualSense Wireless Controller",      false }, // DUALSENSE
+    { 4, 0x046D, 0xC077, "Desktop Mode (Mouse + Keyboard)",                                   true  }, // MOUSE
 };
 
-// Keyboard keys exposed in mouse mode. Order MUST match MouseKeyBit in MouseTarget.kt.
 static const int MOUSE_KEYS[] = {
     KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT,        // 0..3
     KEY_ENTER, KEY_BACK, KEY_TAB, KEY_SPACE,      // 4..7
@@ -42,17 +45,15 @@ static const int MOUSE_KEYS[] = {
     KEY_VOLUMEUP, KEY_VOLUMEDOWN,                 // 10..11
     KEY_PLAYPAUSE, KEY_MENU,                      // 12..13
     KEY_BACKSPACE,                                // 14
-    KEY_SELECT,                                   // 15 → AKEYCODE_DPAD_CENTER, required to "click" on Leanback IME keys
+    KEY_SELECT,                                   // 15 -> AKEYCODE_DPAD_CENTER
 };
 static constexpr int MOUSE_KEY_COUNT = sizeof(MOUSE_KEYS) / sizeof(MOUSE_KEYS[0]);
-// Bits 16,17,18 = BTN_LEFT, BTN_RIGHT, BTN_MIDDLE (handled separately).
 
 static const gamepad_profile* find_profile(int id) {
     for (const auto& p : PROFILES) if (p.id == id) return &p;
-    return &PROFILES[0];  // fallback Xbox 360
+    return &PROFILES[3];  // default DualSense
 }
 
-// Axis ranges matching real Xbox 360 reports
 #define STICK_MIN   -32768
 #define STICK_MAX    32767
 #define TRIG_MIN     0
@@ -60,23 +61,10 @@ static const gamepad_profile* find_profile(int id) {
 #define HAT_MIN     -1
 #define HAT_MAX      1
 
-// Up to three uinput devices live in parallel:
-//   - g_fd_gamepad: emulated controller (Xbox/PS profiles), opened R/W for FF rumble.
-//   - g_fd_mouse:   pure mouse (EV_REL + 3 mouse buttons). Always present alongside
-//                   the gamepad as a "sidecar" so the right trackpad can drive a
-//                   real cursor while games still see a gamepad. In Desktop mode
-//                   this IS the primary device.
-//   - g_fd_kbd:     pure keyboard (EV_KEY). Sidecar in gamepad mode (enables
-//                   keyboard-key mappings on back paddles etc.); primary in Desktop.
-// A single device declaring EV_REL+EV_KEY together gets classified SOURCE_MOUSE
-// by Android, which makes IMEs ignore its key events — splitting into separate
-// fds mirrors how a real composite USB keyboard+mouse combo looks.
 static int g_fd_gamepad = -1;
 static int g_fd_mouse   = -1;
 static int g_fd_kbd     = -1;
 
-// Cached "last frame" state for delta encoding in sendMouseFrame.
-// Reset on every destroy_devices() so a new device starts from a clean slate.
 static int g_last_mouse_buttons = 0;
 static int g_last_kbd_keys      = 0;
 
@@ -118,7 +106,7 @@ static int write_event(int fd, uint16_t type, uint16_t code, int32_t value) {
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_steamcontroller_android_uinput_UInputNative_canOpen(JNIEnv*, jclass) {
+Java_com_questgamepad_android_uinput_UInputNative_canOpen(JNIEnv*, jclass) {
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) {
         LOGI("canOpen: /dev/uinput open denied: %s", strerror(errno));
@@ -128,21 +116,16 @@ Java_com_steamcontroller_android_uinput_UInputNative_canOpen(JNIEnv*, jclass) {
     return JNI_TRUE;
 }
 
-// Slot for one stored FF effect — we only track FF_RUMBLE for now.
 struct ff_slot {
     int id;
-    uint16_t strong;  // left motor magnitude
-    uint16_t weak;    // right motor magnitude
+    uint16_t strong;
+    uint16_t weak;
 };
 static constexpr int MAX_FF_EFFECTS = 4;
 static ff_slot g_ff_effects[MAX_FF_EFFECTS] = {};
-
-// Latest play command pulled by Kotlin via pollFFEvent().
-// strong/weak are 0..65535. -1 magnitudes mean "no pending event".
 static int32_t g_pending_strong = -1;
 static int32_t g_pending_weak   = -1;
 
-// Helper: finalise a uinput device with the given identity strings and create it.
 static int finalize_device(int fd, uint16_t vid, uint16_t pid, const char* name, uint32_t ff_effects_max) {
     struct uinput_setup us;
     memset(&us, 0, sizeof(us));
@@ -163,7 +146,6 @@ static int finalize_device(int fd, uint16_t vid, uint16_t pid, const char* name,
     return 0;
 }
 
-// Set up a pure mouse device (EV_REL + 3 mouse buttons). Returns fd or -1.
 static int create_mouse_fd(uint16_t vid, uint16_t pid) {
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) { LOGE("open /dev/uinput (mouse) failed: %s", strerror(errno)); return -1; }
@@ -176,24 +158,13 @@ static int create_mouse_fd(uint16_t vid, uint16_t pid) {
     if (set_bit_or_log(fd, UI_SET_KEYBIT, BTN_LEFT,   "BTN_LEFT")       < 0) goto fail;
     if (set_bit_or_log(fd, UI_SET_KEYBIT, BTN_RIGHT,  "BTN_RIGHT")      < 0) goto fail;
     if (set_bit_or_log(fd, UI_SET_KEYBIT, BTN_MIDDLE, "BTN_MIDDLE")     < 0) goto fail;
-    if (finalize_device(fd, vid, pid, "Steam Controller Mouse", 0) < 0) goto fail;
+    if (finalize_device(fd, vid, pid, "Quest/Steam Virtual Mouse", 0) < 0) goto fail;
     return fd;
 fail:
     close(fd);
     return -1;
 }
 
-// Set up a pure keyboard device (EV_KEY only). Returns fd or -1.
-//
-// `full_alpha` declares the full A-Z/0-9 alphabet so Android's EventHub classifies
-// this device as INPUT_DEVICE_CLASS_ALPHAKEY + DPAD (needed on Android TV so the
-// Leanback IME routes DPAD navigation correctly — see comment below). ONLY pass
-// true for the Desktop-mode keyboard. Passing true for the gamepad-mode sidecar
-// makes Android believe a real hardware QWERTY keyboard is attached at all times,
-// which suppresses the on-screen keyboard for every text field system-wide while
-// the controller is connected — the gamepad already exposes its own ABS_HAT dpad,
-// so the sidecar doesn't need this trick, only the small MOUSE_KEYS set used by
-// back-paddle key mappings.
 static int create_keyboard_fd(uint16_t vid, uint16_t pid, bool full_alpha) {
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) { LOGE("open /dev/uinput (kbd) failed: %s", strerror(errno)); return -1; }
@@ -203,14 +174,6 @@ static int create_keyboard_fd(uint16_t vid, uint16_t pid, bool full_alpha) {
         if (set_bit_or_log(fd, UI_SET_KEYBIT, MOUSE_KEYS[i], "MOUSE_KEY") < 0) goto fail;
     }
     if (full_alpha) {
-        // Declare the full alphabet + digits so Android's EventHub classifies this
-        // as INPUT_DEVICE_CLASS_ALPHAKEY (cheap test: KEY_Q present).
-        //
-        // Also declare KEY_SELECT (Linux 353) — Generic.kl maps it to DPAD_CENTER,
-        // which is the missing 5th key needed for INPUT_DEVICE_CLASS_DPAD. Without
-        // DPAD class the source is SOURCE_KEYBOARD only, and the Leanback IME on
-        // Android TV source-filters DPAD navigation to SOURCE_DPAD — that's why
-        // arrow presses worked outside the IME but not on the soft keyboard.
         const int alpha_keys[] = {
             KEY_A, KEY_B, KEY_C, KEY_D, KEY_E, KEY_F, KEY_G, KEY_H, KEY_I, KEY_J,
             KEY_K, KEY_L, KEY_M, KEY_N, KEY_O, KEY_P, KEY_Q, KEY_R, KEY_S, KEY_T,
@@ -218,22 +181,437 @@ static int create_keyboard_fd(uint16_t vid, uint16_t pid, bool full_alpha) {
             KEY_0, KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7, KEY_8, KEY_9,
             KEY_LEFTSHIFT, KEY_RIGHTSHIFT, KEY_LEFTCTRL, KEY_LEFTALT, KEY_CAPSLOCK,
             KEY_COMMA, KEY_DOT, KEY_SLASH, KEY_SEMICOLON, KEY_APOSTROPHE,
-            KEY_MINUS, KEY_EQUAL,
-            KEY_SELECT,  // → AKEYCODE_DPAD_CENTER, completes DPAD classification
+            KEY_MINUS, KEY_EQUAL, KEY_SELECT
         };
         for (int k : alpha_keys) {
             if (set_bit_or_log(fd, UI_SET_KEYBIT, k, "alpha KEY") < 0) goto fail;
         }
     }
-    // PID +1 keeps a stable, distinct identity vs the mouse half
-    if (finalize_device(fd, vid, (uint16_t)(pid + 1), "Steam Controller Keyboard", 0) < 0) goto fail;
+    if (finalize_device(fd, vid, (uint16_t)(pid + 1), "Quest/Steam Virtual Keyboard", 0) < 0) goto fail;
     return fd;
 fail:
     close(fd);
     return -1;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DIRECT HARDWARE QUEST EVDEV READER PIPELINE
+// Runs directly inside the Shizuku shell process.
+// Captures /dev/input/event* devices for Meta Quest (vendor 0x2833) and
+// immediately writes real DualSense / Xbox events to /dev/uinput!
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct QuestHwState {
+    int32_t lx = 0;
+    int32_t ly = 0;
+    int32_t rx = 0;
+    int32_t ry = 0;
+    int32_t lt = 0;
+    int32_t rt = 0;
+    int32_t lg = 0; // Left Grip
+    int32_t rg = 0; // Right Grip
+    int32_t dpadX = 0;
+    int32_t dpadY = 0;
+    uint32_t buttons = 0;
+    bool left_thumbrest = false;
+};
+
+static QuestHwState g_hw_state;
+static int g_current_profile_id = 3; // Default DualSense
+static std::atomic<bool> g_forwarding_enabled{true};
+static pthread_mutex_t g_state_mutex = PTHREAD_MUTEX_INITIALIZER;
+static std::atomic<bool> g_reader_running{false};
+static pthread_t g_reader_thread;
+
+static uint32_t g_last_buttons = 0xFFFFFFFF;
+static int32_t g_last_lx = 999999;
+static int32_t g_last_ly = 999999;
+static int32_t g_last_rx = 999999;
+static int32_t g_last_ry = 999999;
+static int32_t g_last_lt = 999999;
+static int32_t g_last_rt = 999999;
+static int32_t g_last_dpadX = 999999;
+static int32_t g_last_dpadY = 999999;
+
+static void forward_state_to_uinput(const QuestHwState& s) {
+    if (g_fd_gamepad < 0) return;
+    if (!g_forwarding_enabled.load()) return;
+
+    bool isPlayStation = (g_current_profile_id == 2 || g_current_profile_id == 3);
+    // On PlayStation (DualSense / DS4 in Android keylayout):
+    // 0x134 is BUTTON_X (Square), 0x133 is BUTTON_Y (Triangle)
+    // On Xbox (XInput in Android):
+    // 0x133 is BUTTON_X (X), 0x134 is BUTTON_Y (Y)
+    const int square_key   = isPlayStation ? 0x134 : 0x133;
+    const int triangle_key = isPlayStation ? 0x133 : 0x134;
+
+    const int bit_to_key[] = {
+        0x130, 0x131, square_key, triangle_key,
+        BTN_TL, BTN_TR,
+        BTN_SELECT, BTN_START, BTN_MODE,
+        BTN_THUMBL, BTN_THUMBR,
+        BTN_TL2, BTN_TR2
+    };
+    const int n = sizeof(bit_to_key) / sizeof(bit_to_key[0]);
+
+    bool any_written = false;
+    uint32_t changed_buttons = s.buttons ^ g_last_buttons;
+    if (changed_buttons != 0) {
+        for (int i = 0; i < n; i++) {
+            if ((changed_buttons >> i) & 1) {
+                int pressed = (s.buttons >> i) & 1;
+                write_event(g_fd_gamepad, EV_KEY, bit_to_key[i], pressed);
+                any_written = true;
+            }
+        }
+        g_last_buttons = s.buttons;
+    }
+
+    int finalLx = s.lx;
+    int finalLy = s.ly;
+    int finalDpadX = s.dpadX;
+    int finalDpadY = s.dpadY;
+
+    // D-Pad Modifier mode: if Left Thumbrest touched
+    bool isModifierActive = s.left_thumbrest;
+    if (isModifierActive) {
+        if (s.ly < -12000) finalDpadY = -1;
+        else if (s.ly > 12000) finalDpadY = 1;
+        if (s.lx < -12000) finalDpadX = -1;
+        else if (s.lx > 12000) finalDpadX = 1;
+
+        // Zero out stick so character does not move
+        finalLx = 0;
+        finalLy = 0;
+    }
+
+    if (finalLx != g_last_lx) { write_event(g_fd_gamepad, EV_ABS, ABS_X, finalLx); g_last_lx = finalLx; any_written = true; }
+    if (finalLy != g_last_ly) { write_event(g_fd_gamepad, EV_ABS, ABS_Y, finalLy); g_last_ly = finalLy; any_written = true; }
+    if (s.rx != g_last_rx) { write_event(g_fd_gamepad, EV_ABS, ABS_RX, s.rx); g_last_rx = s.rx; any_written = true; }
+    if (s.ry != g_last_ry) { write_event(g_fd_gamepad, EV_ABS, ABS_RY, s.ry); g_last_ry = s.ry; any_written = true; }
+    if (s.lt != g_last_lt) { write_event(g_fd_gamepad, EV_ABS, ABS_Z, s.lt); g_last_lt = s.lt; any_written = true; }
+    if (s.rt != g_last_rt) { write_event(g_fd_gamepad, EV_ABS, ABS_RZ, s.rt); g_last_rt = s.rt; any_written = true; }
+    if (finalDpadX != g_last_dpadX) { write_event(g_fd_gamepad, EV_ABS, ABS_HAT0X, finalDpadX); g_last_dpadX = finalDpadX; any_written = true; }
+    if (finalDpadY != g_last_dpadY) { write_event(g_fd_gamepad, EV_ABS, ABS_HAT0Y, finalDpadY); g_last_dpadY = finalDpadY; any_written = true; }
+
+    if (any_written) {
+        write_event(g_fd_gamepad, EV_SYN, SYN_REPORT, 0);
+    }
+}
+
+static inline int normalize_quest_stick(int raw) {
+    int centered = raw - 32768;
+    // Deadzone (~2500 raw units, ~7% of 32768)
+    if (centered > -2500 && centered < 2500) return 0;
+    if (centered < -32768) return -32768;
+    if (centered > 32767) return 32767;
+    return centered;
+}
+
+struct DeviceSlot {
+    int fd = -1;
+    bool is_unified = false; // Unified node with both sticks (ABS_RX present)
+    bool is_left = false;
+    bool is_right = false;
+};
+
+static void* quest_evdev_reader_loop(void*) {
+    LOGI("Hardware Quest evdev background reader started");
+
+    DeviceSlot slots[16];
+    int slot_count = 0;
+
+    auto rescan_devices = [&]() {
+        // Close existing
+        for (int i = 0; i < slot_count; i++) {
+            if (slots[i].fd >= 0) close(slots[i].fd);
+            slots[i].fd = -1;
+        }
+        slot_count = 0;
+
+        for (int i = 0; i < 32 && slot_count < 16; i++) {
+            char path[64];
+            snprintf(path, sizeof(path), "/dev/input/event%d", i);
+            int fd = open(path, O_RDONLY | O_NONBLOCK);
+            if (fd < 0) continue;
+
+            struct input_id id;
+            if (ioctl(fd, EVIOCGID, &id) < 0 || id.vendor != 0x2833) {
+                close(fd);
+                continue;
+            }
+
+            char name[128] = {0};
+            ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name);
+            LOGI("Discovered Quest controller node: %s (name: %s, product: 0x%04X)", path, name, id.product);
+
+            slots[slot_count].fd = fd;
+            slots[slot_count].is_unified = false;
+            slots[slot_count].is_left = false;
+            slots[slot_count].is_right = false;
+
+            // Check if device is unified (has ABS_RX for right stick)
+            uint8_t abs_bits[(ABS_MAX + 7) / 8] = {0};
+            if (ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(abs_bits)), abs_bits) >= 0) {
+                bool has_rx = (abs_bits[ABS_RX / 8] & (1 << (ABS_RX % 8))) != 0;
+                if (has_rx) {
+                    slots[slot_count].is_unified = true;
+                    slots[slot_count].is_left = true;
+                    slots[slot_count].is_right = true;
+                    LOGI("-> Configured as UNIFIED Quest Controller node (both sticks & triggers): %s", path);
+                }
+            }
+
+            if (!slots[slot_count].is_unified) {
+                uint8_t key_bits[(KEY_MAX + 7) / 8] = {0};
+                ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(key_bits)), key_bits);
+                bool has_x_or_y = ((key_bits[BTN_X / 8] & (1 << (BTN_X % 8))) != 0) ||
+                                  ((key_bits[BTN_Y / 8] & (1 << (BTN_Y % 8))) != 0) ||
+                                  ((key_bits[BTN_THUMBL / 8] & (1 << (BTN_THUMBL % 8))) != 0);
+                bool has_a_or_b = ((key_bits[BTN_A / 8] & (1 << (BTN_A % 8))) != 0) ||
+                                  ((key_bits[BTN_B / 8] & (1 << (BTN_B % 8))) != 0) ||
+                                  ((key_bits[BTN_THUMBR / 8] & (1 << (BTN_THUMBR % 8))) != 0);
+
+                if (has_x_or_y && !has_a_or_b) {
+                    slots[slot_count].is_left = true;
+                } else if (has_a_or_b && !has_x_or_y) {
+                    slots[slot_count].is_right = true;
+                } else if (strstr(name, "Left") != nullptr) {
+                    slots[slot_count].is_left = true;
+                } else if (strstr(name, "Right") != nullptr) {
+                    slots[slot_count].is_right = true;
+                } else {
+                    slots[slot_count].is_left = (slot_count == 0);
+                    slots[slot_count].is_right = (slot_count > 0);
+                }
+                LOGI("-> Configured as separate node: %s (is_left=%d, is_right=%d)",
+                     path, slots[slot_count].is_left, slots[slot_count].is_right);
+            }
+
+            slot_count++;
+        }
+    };
+
+    rescan_devices();
+
+    while (g_reader_running.load()) {
+        if (slot_count == 0) {
+            sleep(1);
+            rescan_devices();
+            continue;
+        }
+
+        struct pollfd pfd[16];
+        for (int i = 0; i < slot_count; i++) {
+            pfd[i].fd = slots[i].fd;
+            pfd[i].events = POLLIN;
+            pfd[i].revents = 0;
+        }
+
+        int ret = poll(pfd, slot_count, 100);
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (ret == 0) continue;
+
+        for (int i = 0; i < slot_count; i++) {
+            if (!(pfd[i].revents & POLLIN)) continue;
+
+            struct input_event evs[32];
+            int n = read(slots[i].fd, evs, sizeof(evs));
+            if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                LOGW("Controller disconnected: event node %d", i);
+                rescan_devices();
+                break;
+            }
+
+            int count = n / sizeof(struct input_event);
+            bool state_changed = false;
+
+            for (int k = 0; k < count; k++) {
+                const auto& ev = evs[k];
+
+                if (ev.type == EV_KEY) {
+                    pthread_mutex_lock(&g_state_mutex);
+                    if (!slots[i].is_unified) {
+                        // Dynamically associate Left vs Right on distinctive buttons for separate nodes
+                        if (ev.code == BTN_X || ev.code == BTN_Y || ev.code == BTN_SELECT || ev.code == BTN_THUMBL) {
+                            slots[i].is_left = true;
+                            slots[i].is_right = false;
+                        } else if (ev.code == BTN_A || ev.code == BTN_B || ev.code == BTN_START || ev.code == BTN_THUMBR) {
+                            slots[i].is_right = true;
+                            slots[i].is_left = false;
+                        }
+                    }
+
+                    int mask = 0;
+                    if (ev.code == BTN_A)       mask = (1 << 0); // Cross
+                    if (ev.code == BTN_B)       mask = (1 << 1); // Circle
+                    if (ev.code == BTN_X)       mask = (1 << 2); // Square
+                    if (ev.code == BTN_Y)       mask = (1 << 3); // Triangle
+                    if (ev.code == BTN_TL)      mask = (1 << 4); // L1 Bumper
+                    if (ev.code == BTN_TR)      mask = (1 << 5); // R1 Bumper
+                    if (ev.code == BTN_SELECT)  mask = (1 << 6); // Create / Share
+                    if (ev.code == BTN_START)   mask = (1 << 7); // Options
+                    if (ev.code == BTN_MODE)    mask = (1 << 8); // PS Button
+                    if (ev.code == BTN_THUMBL)  mask = (1 << 9); // L3
+                    if (ev.code == BTN_THUMBR)  mask = (1 << 10); // R3
+                    if (ev.code == BTN_TL2)     mask = (1 << 11); // L2
+                    if (ev.code == BTN_TR2)     mask = (1 << 12); // R2
+
+                    if (mask != 0) {
+                        if (ev.value != 0) g_hw_state.buttons |= mask;
+                        else g_hw_state.buttons &= ~mask;
+                        state_changed = true;
+                        LOGI("Quest HW Key: code=0x%04X val=%d -> buttons=0x%04X", ev.code, ev.value, g_hw_state.buttons);
+
+                        // Quick-toggle: L3 (bit 9) + R3 (bit 10) pressed together toggles VR pointer vs Gamepad mode
+                        static bool s_both_clicked_last = false;
+                        bool both_clicked = ((g_hw_state.buttons & (1 << 9)) != 0) && ((g_hw_state.buttons & (1 << 10)) != 0);
+                        if (both_clicked && !s_both_clicked_last) {
+                            bool newState = !g_forwarding_enabled.load();
+                            g_forwarding_enabled.store(newState);
+                            LOGI(">>> L3 + R3 QUICK TOGGLE: Gamepad Forwarding is now %s <<<", newState ? "ACTIVE" : "PAUSED (VR laser pointer mode)");
+                            if (!newState && g_fd_gamepad >= 0) {
+                                QuestHwState neutral;
+                                forward_state_to_uinput(neutral);
+                            }
+                        }
+                        s_both_clicked_last = both_clicked;
+                    } else if (ev.code == BTN_DPAD_UP) {
+                        if (ev.value != 0) g_hw_state.dpadY = -1;
+                        else if (g_hw_state.dpadY == -1) g_hw_state.dpadY = 0;
+                        state_changed = true;
+                    } else if (ev.code == BTN_DPAD_DOWN) {
+                        if (ev.value != 0) g_hw_state.dpadY = 1;
+                        else if (g_hw_state.dpadY == 1) g_hw_state.dpadY = 0;
+                        state_changed = true;
+                    } else if (ev.code == BTN_DPAD_LEFT) {
+                        if (ev.value != 0) g_hw_state.dpadX = -1;
+                        else if (g_hw_state.dpadX == -1) g_hw_state.dpadX = 0;
+                        state_changed = true;
+                    } else if (ev.code == BTN_DPAD_RIGHT) {
+                        if (ev.value != 0) g_hw_state.dpadX = 1;
+                        else if (g_hw_state.dpadX == 1) g_hw_state.dpadX = 0;
+                        state_changed = true;
+                    }
+                    pthread_mutex_unlock(&g_state_mutex);
+                } else if (ev.type == EV_ABS) {
+                    pthread_mutex_lock(&g_state_mutex);
+                    if (slots[i].is_unified) {
+                        // UNIFIED DEVICE: ABS_X/Y is LEFT stick, ABS_RX/RY is RIGHT stick!
+                        if (ev.code == ABS_X) {
+                            g_hw_state.lx = normalize_quest_stick(ev.value);
+                            state_changed = true;
+                        } else if (ev.code == ABS_Y) {
+                            g_hw_state.ly = normalize_quest_stick(ev.value);
+                            state_changed = true;
+                        } else if (ev.code == ABS_RX) {
+                            g_hw_state.rx = normalize_quest_stick(ev.value);
+                            state_changed = true;
+                        } else if (ev.code == ABS_RY) {
+                            g_hw_state.ry = normalize_quest_stick(ev.value);
+                            state_changed = true;
+                        } else if (ev.code == ABS_Z || ev.code == ABS_BRAKE) {
+                            int val = (ev.value * 255) / 1023;
+                            if (val < 0) val = 0; if (val > 255) val = 255;
+                            g_hw_state.lt = val;
+                            if (val > 30) g_hw_state.buttons |= (1 << 11);
+                            else g_hw_state.buttons &= ~(1 << 11);
+                            state_changed = true;
+                        } else if (ev.code == ABS_RZ || ev.code == ABS_GAS) {
+                            int val = (ev.value * 255) / 1023;
+                            if (val < 0) val = 0; if (val > 255) val = 255;
+                            g_hw_state.rt = val;
+                            if (val > 30) g_hw_state.buttons |= (1 << 12);
+                            else g_hw_state.buttons &= ~(1 << 12);
+                            state_changed = true;
+                        } else if (ev.code == ABS_HAT0X) {
+                            g_hw_state.dpadX = ev.value;
+                            state_changed = true;
+                        } else if (ev.code == ABS_HAT0Y) {
+                            g_hw_state.dpadY = ev.value;
+                            state_changed = true;
+                        }
+                    } else {
+                        // SEPARATE CONTROLLER NODES
+                        if (slots[i].is_right) {
+                            if (ev.code == ABS_X || ev.code == ABS_RX) {
+                                g_hw_state.rx = normalize_quest_stick(ev.value);
+                                state_changed = true;
+                            } else if (ev.code == ABS_Y || ev.code == ABS_RY) {
+                                g_hw_state.ry = normalize_quest_stick(ev.value);
+                                state_changed = true;
+                            } else if (ev.code == ABS_Z || ev.code == ABS_GAS) {
+                                int val = (ev.value * 255) / 1023;
+                                if (val < 0) val = 0; if (val > 255) val = 255;
+                                g_hw_state.rt = val;
+                                if (val > 30) g_hw_state.buttons |= (1 << 12);
+                                else g_hw_state.buttons &= ~(1 << 12);
+                                state_changed = true;
+                            } else if (ev.code == ABS_RZ) {
+                                g_hw_state.rg = ev.value;
+                                if (ev.value > 400) g_hw_state.buttons |= (1 << 5); // R1 Bumper
+                                else g_hw_state.buttons &= ~(1 << 5);
+                                state_changed = true;
+                            }
+                        } else {
+                            // Left controller
+                            if (ev.code == ABS_X) {
+                                g_hw_state.lx = normalize_quest_stick(ev.value);
+                                state_changed = true;
+                            } else if (ev.code == ABS_Y) {
+                                g_hw_state.ly = normalize_quest_stick(ev.value);
+                                state_changed = true;
+                            } else if (ev.code == ABS_Z || ev.code == ABS_BRAKE) {
+                                int val = (ev.value * 255) / 1023;
+                                if (val < 0) val = 0; if (val > 255) val = 255;
+                                g_hw_state.lt = val;
+                                if (val > 30) g_hw_state.buttons |= (1 << 11);
+                                else g_hw_state.buttons &= ~(1 << 11);
+                                state_changed = true;
+                            } else if (ev.code == ABS_RZ) {
+                                g_hw_state.lg = ev.value;
+                                if (ev.value > 400) g_hw_state.buttons |= (1 << 4); // L1 Bumper
+                                else g_hw_state.buttons &= ~(1 << 4);
+                                state_changed = true;
+                            }
+                        }
+                    }
+                    pthread_mutex_unlock(&g_state_mutex);
+                } else if (ev.type == EV_SYN) {
+                    pthread_mutex_lock(&g_state_mutex);
+                    forward_state_to_uinput(g_hw_state);
+                    pthread_mutex_unlock(&g_state_mutex);
+                }
+            }
+        }
+    }
+
+    for (int i = 0; i < slot_count; i++) {
+        if (slots[i].fd >= 0) close(slots[i].fd);
+    }
+    LOGI("Hardware Quest evdev background reader stopped");
+    return nullptr;
+}
+
+static void start_quest_reader() {
+    if (g_reader_running.load()) return;
+    g_reader_running.store(true);
+    pthread_create(&g_reader_thread, nullptr, quest_evdev_reader_loop, nullptr);
+}
+
+static void stop_quest_reader() {
+    if (!g_reader_running.load()) return;
+    g_reader_running.store(false);
+    pthread_join(g_reader_thread, nullptr);
+}
+
 static void destroy_devices() {
+    stop_quest_reader();
+
     bool destroyed = false;
     if (g_fd_gamepad >= 0) {
         ioctl(g_fd_gamepad, UI_DEV_DESTROY);
@@ -253,32 +631,32 @@ static void destroy_devices() {
         g_fd_kbd = -1;
         destroyed = true;
     }
-    // Any cached delta-state belonged to the destroyed device — reset.
     g_last_mouse_buttons = 0;
     g_last_kbd_keys = 0;
     if (destroyed) {
-        // Give the kernel + InputReader a moment to fully release the input
-        // device records. Without this, rapid profile switching can hit transient
-        // failures (UI_DEV_CREATE returns success but Android never sees the new
-        // device, leaving the UI thinking it's healthy while no events flow).
-        struct timespec ts = { 0, 80 * 1000 * 1000 };  // 80ms
+        struct timespec ts = { 0, 80 * 1000 * 1000 };
         nanosleep(&ts, nullptr);
     }
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_steamcontroller_android_uinput_UInputNative_createDevice(JNIEnv*, jclass, jint profileId) {
+Java_com_questgamepad_android_uinput_UInputNative_createDevice(JNIEnv*, jclass, jint profileId) {
     const gamepad_profile* prof = find_profile(profileId);
+    g_current_profile_id = profileId;
     LOGI("createDevice: profile=%d (VID=0x%04X PID=0x%04X name=\"%s\")",
          prof->id, prof->vid, prof->pid, prof->name);
 
     destroy_devices();
+    g_last_buttons = 0xFFFFFFFF;
+    g_last_lx = 999999; g_last_ly = 999999;
+    g_last_rx = 999999; g_last_ry = 999999;
+    g_last_lt = 999999; g_last_rt = 999999;
+    g_last_dpadX = 999999; g_last_dpadY = 999999;
 
     if (prof->mouse_mode) {
-        // Desktop: just mouse + keyboard, no gamepad.
         int mouse_fd = create_mouse_fd(prof->vid, prof->pid);
         if (mouse_fd < 0) return JNI_FALSE;
-        int kbd_fd = create_keyboard_fd(prof->vid, prof->pid, /*full_alpha=*/true);
+        int kbd_fd = create_keyboard_fd(prof->vid, prof->pid, true);
         if (kbd_fd < 0) {
             ioctl(mouse_fd, UI_DEV_DESTROY);
             close(mouse_fd);
@@ -287,12 +665,10 @@ Java_com_steamcontroller_android_uinput_UInputNative_createDevice(JNIEnv*, jclas
         g_fd_mouse = mouse_fd;
         g_fd_kbd   = kbd_fd;
         LOGI("Desktop devices created — mouse fd=%d, kbd fd=%d", mouse_fd, kbd_fd);
+        start_quest_reader();
         return JNI_TRUE;
     }
 
-    // Gamepad path — gamepad device + sidecar mouse + sidecar keyboard.
-    // The sidecar pair lets the right trackpad drive a cursor and lets back-paddle
-    // mappings hit keyboard keys, while games still see a proper gamepad.
     int fd = open("/dev/uinput", O_RDWR | O_NONBLOCK);
     if (fd < 0) {
         LOGE("open /dev/uinput failed: %s", strerror(errno));
@@ -312,7 +688,8 @@ Java_com_steamcontroller_android_uinput_UInputNative_createDevice(JNIEnv*, jclas
             BTN_A, BTN_B, BTN_X, BTN_Y,
             BTN_TL, BTN_TR,
             BTN_SELECT, BTN_START, BTN_MODE,
-            BTN_THUMBL, BTN_THUMBR
+            BTN_THUMBL, BTN_THUMBR,
+            BTN_TL2, BTN_TR2
         };
         for (int b : btns) {
             if (set_bit_or_log(fd, UI_SET_KEYBIT, b, "KEY") < 0) goto fail;
@@ -337,16 +714,13 @@ Java_com_steamcontroller_android_uinput_UInputNative_createDevice(JNIEnv*, jclas
     LOGI("Virtual gamepad created (profile=%d), fd=%d", prof->id, fd);
     g_fd_gamepad = fd;
 
-    // Sidecar mouse + keyboard — non-fatal if either fails (gamepad still works).
     g_fd_mouse = create_mouse_fd(prof->vid, (uint16_t)(prof->pid + 0x100));
-    if (g_fd_mouse < 0) {
-        LOGE("Sidecar mouse creation failed — trackpad-as-cursor will be unavailable");
-    }
-    g_fd_kbd = create_keyboard_fd(prof->vid, (uint16_t)(prof->pid + 0x200), /*full_alpha=*/false);
-    if (g_fd_kbd < 0) {
-        LOGE("Sidecar keyboard creation failed — key mappings on back paddles will be unavailable");
-    }
+    g_fd_kbd = create_keyboard_fd(prof->vid, (uint16_t)(prof->pid + 0x200), false);
     LOGI("Gamepad devices ready — gamepad=%d, mouse=%d, kbd=%d", g_fd_gamepad, g_fd_mouse, g_fd_kbd);
+
+    // Launch direct hardware reader
+    start_quest_reader();
+
     return JNI_TRUE;
 
 fail:
@@ -355,7 +729,7 @@ fail:
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_steamcontroller_android_uinput_UInputNative_sendFrame(
+Java_com_questgamepad_android_uinput_UInputNative_sendFrame(
         JNIEnv*, jclass,
         jint buttons,
         jint lx, jint ly, jint rx, jint ry,
@@ -363,14 +737,12 @@ Java_com_steamcontroller_android_uinput_UInputNative_sendFrame(
         jint dpadX, jint dpadY) {
     if (g_fd_gamepad < 0) return;
 
-    // Bit-to-keycode pairs — order must match XboxDescriptor.kt bit positions.
-    // bit 0 = A, 1 = B, 2 = X, 3 = Y, 4 = LB, 5 = RB,
-    // 6 = SELECT, 7 = START, 8 = MODE, 9 = THUMBL, 10 = THUMBR
     static const int bit_to_key[] = {
         BTN_A, BTN_B, BTN_X, BTN_Y,
         BTN_TL, BTN_TR,
         BTN_SELECT, BTN_START, BTN_MODE,
-        BTN_THUMBL, BTN_THUMBR
+        BTN_THUMBL, BTN_THUMBR,
+        BTN_TL2, BTN_TR2
     };
     const int n = sizeof(bit_to_key) / sizeof(bit_to_key[0]);
     for (int i = 0; i < n; i++) {
@@ -390,18 +762,20 @@ Java_com_steamcontroller_android_uinput_UInputNative_sendFrame(
     write_event(g_fd_gamepad, EV_SYN, SYN_REPORT, 0);
 }
 
-// Drain any pending events from the uinput fd. We care about:
-//   - UI_FF_UPLOAD: a game uploads an effect. Read the ff_effect, store it by id.
-//   - UI_FF_ERASE:  effect removed by the game. Free the slot.
-//   - EV_FF code=effect_id value=N: play the effect N times (N=0 → stop).
-// Returns: jintArray of size 2 [strongMagnitude, weakMagnitude] (each 0..65535),
-//          or null if no rumble event is pending.
+extern "C" JNIEXPORT void JNICALL
+Java_com_questgamepad_android_uinput_UInputNative_sendMotionFrame(
+        JNIEnv*, jclass,
+        jint /*gyroX*/, jint /*gyroY*/, jint /*gyroZ*/,
+        jint /*accelX*/, jint /*accelY*/, jint /*accelZ*/) {
+    if (g_fd_gamepad < 0) return;
+    write_event(g_fd_gamepad, EV_SYN, SYN_REPORT, 0);
+}
+
 extern "C" JNIEXPORT jintArray JNICALL
-Java_com_steamcontroller_android_uinput_UInputNative_pollFFEvent(JNIEnv* env, jclass) {
+Java_com_questgamepad_android_uinput_UInputNative_pollFFEvent(JNIEnv* env, jclass) {
     if (g_fd_gamepad < 0) return nullptr;
 
     struct input_event ev;
-    // Drain everything available — there may be multiple events in flight
     while (read(g_fd_gamepad, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
         if (ev.type == EV_UINPUT && ev.code == UI_FF_UPLOAD) {
             struct uinput_ff_upload upload;
@@ -409,7 +783,6 @@ Java_com_steamcontroller_android_uinput_UInputNative_pollFFEvent(JNIEnv* env, jc
             upload.request_id = ev.value;
             if (ioctl(g_fd_gamepad, UI_BEGIN_FF_UPLOAD, &upload) >= 0) {
                 if (upload.effect.type == FF_RUMBLE) {
-                    // Find/use slot matching effect.id (or first free)
                     int slot = -1;
                     for (int i = 0; i < MAX_FF_EFFECTS; i++) {
                         if (g_ff_effects[i].id == upload.effect.id) { slot = i; break; }
@@ -443,7 +816,6 @@ Java_com_steamcontroller_android_uinput_UInputNative_pollFFEvent(JNIEnv* env, jc
                 ioctl(g_fd_gamepad, UI_END_FF_ERASE, &erase);
             }
         } else if (ev.type == EV_FF) {
-            // Play or stop. ev.code = effect id, ev.value = play count (0 = stop)
             int effect_id = ev.code;
             if (ev.value == 0) {
                 g_pending_strong = 0;
@@ -470,22 +842,12 @@ Java_com_steamcontroller_android_uinput_UInputNative_pollFFEvent(JNIEnv* env, jc
     return result;
 }
 
-// Mouse + keyboard frame. `relX`/`relY` are mouse motion deltas, `scrollY` is wheel ticks,
-// `keys` is a bitmask: bits 0..MOUSE_KEY_COUNT-1 = MOUSE_KEYS entries (routed to the
-// keyboard fd), bits 15/16/17 = BTN_LEFT/RIGHT/MIDDLE (routed to the mouse fd).
-//
-// Only writes EV_KEY events when the bit actually changes, and only writes SYN_REPORT
-// on a fd that emitted at least one event this frame. This is required for IME focus:
-// if the mouse fd reports every frame (300Hz), Android keeps the cursor "active" and
-// routes DPAD events to it instead of the focused IME view.
 extern "C" JNIEXPORT void JNICALL
-Java_com_steamcontroller_android_uinput_UInputNative_sendMouseFrame(
+Java_com_questgamepad_android_uinput_UInputNative_sendMouseFrame(
         JNIEnv*, jclass, jint relX, jint relY, jint scrollY, jint keys) {
-    // Bit 16/17/18 of `keys` = BTN_LEFT/RIGHT/MIDDLE; bits 0..MOUSE_KEY_COUNT-1 = keyboard keys.
     const int mouse_bits = keys & ((1 << 16) | (1 << 17) | (1 << 18));
     const int kbd_bits   = keys & ((1 << MOUSE_KEY_COUNT) - 1);
 
-    // Mouse fd: motion + button edges
     if (g_fd_mouse >= 0) {
         bool any_event = false;
         const int btn_changed = mouse_bits ^ g_last_mouse_buttons;
@@ -501,7 +863,6 @@ Java_com_steamcontroller_android_uinput_UInputNative_sendMouseFrame(
         }
     }
 
-    // Keyboard fd: only emit on bit change
     if (g_fd_kbd >= 0) {
         const int kbd_changed = kbd_bits ^ g_last_kbd_keys;
         if (kbd_changed != 0) {
@@ -517,7 +878,17 @@ Java_com_steamcontroller_android_uinput_UInputNative_sendMouseFrame(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_steamcontroller_android_uinput_UInputNative_destroy(JNIEnv*, jclass) {
+Java_com_questgamepad_android_uinput_UInputNative_setForwardingEnabled(JNIEnv*, jclass, jboolean enabled) {
+    g_forwarding_enabled.store(enabled);
+    if (!enabled && g_fd_gamepad >= 0) {
+        QuestHwState neutral;
+        forward_state_to_uinput(neutral);
+    }
+    LOGI("Native forwarding enabled set to: %d", enabled ? 1 : 0);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_questgamepad_android_uinput_UInputNative_destroy(JNIEnv*, jclass) {
     destroy_devices();
     LOGI("Virtual devices destroyed");
 }

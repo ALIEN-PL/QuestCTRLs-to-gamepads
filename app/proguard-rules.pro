@@ -1,2 +1,3 @@
--keep class rikka.shizuku.** { *; }
--keep class com.steamcontroller.android.** { *; }
+# Add project specific ProGuard rules here.
+-keep class dev.rikka.shizuku.** { *; }
+-keep class com.questgamepad.android.uinput.** { *; }

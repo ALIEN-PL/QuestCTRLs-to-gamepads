@@ -1,185 +1,161 @@
-# Steam Controller for Android
+# QuestCTRLs to Gamepads (Virtual DualSense & Xbox for Meta Quest)
 
-Use the **Steam Controller 2026** (Valve, codename *Ibex*) as a standard Android gamepad — no root required. Connect via USB OTG / wireless Puck, or directly via Bluetooth.
+> **Fork Information:**  
+> This project is a fork of the excellent [SteamController-Android](https://github.com/SonicDX12/SteamController-Android) created by [Kevin (SonicDX12)](https://github.com/SonicDX12).  
+> While the upstream project focused on Valve Steam Controller support over USB OTG/BLE, this fork massively expands the architecture to natively support **Meta Quest VR controllers (Quest 2, Quest 3 / 3S, Quest Pro)** as high-performance virtual gamepads on **Meta Horizon OS** (Android) via Linux `/dev/uinput` and Shizuku. Steam Controller and generic gamepad modes remain fully supported.
 
-The app reads the controller's proprietary HID protocol and exposes it to Android as a virtual gamepad through Linux `uinput` (accessed via Shizuku), so any game that supports controllers sees a real input device — Xbox 360, Xbox One, DualShock 4 or DualSense, your choice. A **Desktop mode** turns the same controller into a virtual mouse + keyboard, ideal for Android TV boxes.
+---
 
-## Features
+**QuestCTRLs to Gamepads** maps **Meta Quest 2**, **Meta Quest 3 / 3S**, and **Meta Quest Pro** controllers (as well as the **Valve Steam Controller** and generic gamepads) into a fully functional virtual **Sony PlayStation 5 DualSense**, **DualShock 4**, **Xbox 360**, **Xbox One**, or **Desktop Mouse/Keyboard**.
 
-### Connection
-- **USB OTG** — wired or via the wireless Puck dongle
-- **Bluetooth LE** — direct pairing with the controller, no dongle needed
-- **Live transport switching** in the UI (toggle group with USB and Bluetooth icons)
-- **Refresh paired BT devices** without restarting the app
-- **In-app help dialog** explaining the controller's wireless mode combos (Steam+A+R1, Steam+B+R1, etc.)
+Designed specifically for **Meta Horizon OS** (Android) and standalone VR headsets, allowing you to play flat 2D Android games (e.g. *Genshin Impact*, *Minecraft*, *Dead Cells*), retro emulators (*RetroArch*, *PPSSPP*, *AetherSX2*, *Dolphin*), and Cloud Gaming services (*GeForce NOW*, *Xbox Cloud Gaming*, *PlayStation Remote Play*) using your Quest Touch controllers as a real unified physical gamepad!
 
-### Emulation
-- **Five virtual profiles**: Xbox 360 (default), Xbox One, Sony DualShock 4, Sony DualSense, and **Desktop** (mouse + keyboard)
-- **Cycle gamepad profiles directly from the notification** (`↻ → next profile`) without opening the app
-- **Real `InputDevice`** via Linux `uinput` (UID shell via Shizuku UserService) — recognised by games as a real gamepad, not filtered like injected events
-- **Automatic fallback** to `IInputManager.injectInputEvent` if `/dev/uinput` is denied (less compatible, kept as safety net)
+---
 
-### Desktop mode
-- Turns the controller into a virtual **mouse + keyboard** — right trackpad drives the cursor, left trackpad scrolls, buttons map to common keys (volume, play/pause, back, home, enter, escape, tab, space, etc.)
-- Even while a gamepad profile is active, the trackpads can double as a mouse sidecar (toggle in Calibration) so you can still navigate menus without switching profiles
-- Full **Android TV** support: dedicated banner/leanback UI, D-pad focus navigation, on-screen keyboard shows up correctly when a text field is focused
+## 🎮 Key Features
 
-### Game Profiles
-- Save the current calibration, button mapping, rumble intensity and mouse sensitivity as a **named preset**
-- Load, rename, duplicate or delete presets from a dedicated screen
-- **Bind a preset to one or more apps** — the service automatically switches profile when you launch a bound game (foreground-app detection, no manual step)
+### 1. Multi-Controller Support
+- **Meta Quest 3 / 3S (Touch Plus)**: Direct hardware evdev input aggregation, unified dual-stick tracking, ultra-low latency (<1 ms).
+- **Meta Quest Pro (Touch Pro)**: Self-tracking 6DoF, stylus pressure, trigger curl pinch.
+- **Meta Quest 2 (Touch v3)**: Full dual-controller mapping with tracking rings.
+- **Valve Steam Controller**: USB OTG and Bluetooth LE support (integrated from `SteamController-Android`).
+- **Generic Gamepad / HID**: Remap any physical controller to DualSense / Xbox layout.
+- **Low-Latency Network Streamer (UDP port 52525)**: Send/receive Quest controller packets wirelessly to a companion device or PC.
 
-### Tuning
-- **Per-stick calibration** — radial dead zone (0–30%), center offset capture, Y-axis inversion, live 2D preview
-- **Custom button mapping** — categorised list (Face / Bumpers / Triggers full-press / Stick clicks / System / Back paddles / Grips), using the official Steam Input button icons. Any source button to any target, including back paddles L4/L5/R4/R5, the Quick Access Menu button, and forcing a trigger to "fully pulled"
-- **Special actions** — map any button to **📸 Take screenshot** (saved in Pictures/Screenshots, visible immediately in the gallery)
-- **Rumble forwarding pipeline** with adjustable intensity (0–100%) and a manual "Test rumble" button (Bluetooth only for now — see Known limitations)
+### 2. Virtual Gamepad Emulation Profiles (`/dev/uinput`)
+- **Sony DualSense (PS5)** (`VID 0x054C`, `PID 0x0CE6`) — Cross, Circle, Square, Triangle, L1, R1, L2, R2, L3, R3, Create, Options, PS Button (matches Android's official `/system/usr/keylayout/Vendor_054c_Product_0ce6.kl`).
+- **Sony DualShock 4 (PS4)** (`VID 0x054C`, `PID 0x05C4`).
+- **Microsoft Xbox 360** (`VID 0x045E`, `PID 0x028E`).
+- **Microsoft Xbox One** (`VID 0x045E`, `PID 0x02EA`).
+- **Desktop Mode** (Virtual Mouse + Keyboard): Right stick/trackpad drives cursor, buttons trigger Enter, Back, Esc, Volume, Tab.
 
-### Backup & restore
-- **Export** every live setting and all Game Profiles to a single JSON file via the system file picker
-- **Import** that file back at any time — handy after reinstalling the app or moving to a new phone
+### 3. Intelligent Quest Dual-Controller Aggregation
+On Quest, the user holds two independent controllers (Left and Right). QuestCTRLs to Gamepads unifies them into a single standard 16-button gamepad:
+- **Left Stick** ➔ Gamepad Left Stick (LS / L3 Click)
+- **Right Stick** ➔ Gamepad Right Stick (RS / R3 Click)
+- **Right Face Buttons (A / B)** ➔ DualSense Cross (✕) / Circle (○) [Xbox A / B]
+- **Left Face Buttons (X / Y)** ➔ DualSense Square (□) / Triangle (△) [Xbox X / Y]
+- **Index Triggers** ➔ Analog L2 / R2 (0–255)
+- **Grip Triggers** ➔ L1 / R1 Bumpers (or D-Pad modifier)
+- **Menu Button (Left)** ➔ Create / Share / View
+- **Oculus Button (Right)** ➔ Options / Start / PS Guide
 
-### Auto-update
-- Checks GitHub Releases for a newer version at launch (once every 24h) or on demand
-- Shows the release notes and downloads the signed APK straight from GitHub, then hands off to the system installer
+### 4. D-Pad & Quick-Toggle Features
+- **Quick-Toggle Shortcut (L3 + R3)**: Simultaneously clicking both thumbsticks toggles gamepad forwarding on the fly, immediately restoring the VR pointer for system navigation without closing your game.
+- **D-Pad Modifier Shift**: Touching the **Left Thumbrest** transforms the **Left Stick** or buttons into **D-Pad Up/Down/Left/Right**.
 
-### Debug & status
-- **HID debug view** — every button, stick, trigger, trackpad, IMU quaternion and raw hex dump, updated at the controller's ~300 Hz
-- **Battery indicator** in the status card and in the notification — works over both USB and Bluetooth
-- **Persistent foreground service notification** with the active emulation profile, battery, profile-cycle action, and stop action
+### 5. Gyro Motion Aiming & Force Feedback
+- **DualSense Motion Sensor**: Quest 6DoF controller orientation and angular velocity are fed into DualSense gyro aiming.
+- **Haptic Rumble Pipeline**: Game vibration events intercepted via Linux `FF_RUMBLE` on `/dev/uinput` are forwarded directly as haptic pulses to Quest controller vibration motors.
 
-### Platform
-- **Material 3** design with Steam blue accents
-- **Adaptive layouts** — phone (max-width 520dp), tablet (`sw600dp`, two-column layouts) and Android TV (`television`, leanback navigation)
+---
 
-## Requirements
+## 🚀 Setup & Installation on Meta Quest
 
-- Android 8.0+ (API 26) — phone, tablet, or Android TV
-- [Shizuku](https://shizuku.rikka.app/) installed and running
-- For USB: USB Host (OTG) support on the phone/tablet
-- For Bluetooth: standard BLE (available on every modern Android)
-- A **Steam Controller 2026** (Valve Ibex). The older Steam Controller is not yet supported.
+### Prerequisites
+1. **Developer Mode** enabled on your Meta Quest headset.
+2. [Shizuku](https://shizuku.rikka.app/) installed on the headset (provides `/dev/uinput` access without root).
 
-## Setup
+### Step-by-Step Guide
 
-1. Install [Shizuku](https://shizuku.rikka.app/) and start it (ADB Wireless on Android 11+, or one-time ADB cable for older versions).
-2. Install this app and grant it the Shizuku permission when prompted.
-3. Grant the **POST_NOTIFICATIONS** permission when asked (Android 13+) so the foreground status notification shows up.
-4. **For USB**: plug the Puck (or the controller directly) into the OTG port. Android will ask for USB permission.
-5. **For Bluetooth**: pair the controller via Android Settings → Bluetooth first, then select it from the Bluetooth device dropdown in the app. Use the `↻` refresh button if you just paired it.
-6. Pick the emulated controller profile (Xbox 360 is the safest default for games — broadest compatibility. Pick Desktop for mouse + keyboard, e.g. on Android TV).
-7. Hit **Start Service**. The status card shows `Mode: <profile> (uinput) ✓` when everything is up.
-8. Optional: tune everything to your liking (calibration, mapping, rumble) and save it as a **Game Profile** — bind it to a game so it auto-loads next time you launch it.
-
-If `uinput` is blocked by SELinux on your device (rare on stock Android, possible on some hardened ROMs), the app falls back to `injectInputEvent`, which works in most apps but is filtered by many games.
-
-## How it works
-
-```
-Steam Controller (USB or BT)
-         │
-         ▼
-HID report parser  (report 0x45 state, 53B USB / 45B BLE — plus a
-                     dedicated 0x43 battery status report)
-         │  validated against SteamlessController.h + hardware capture
-         ▼
-ControllerService
-   • debounce (15-bit injectable mask, 3 frames)
-   • baseline state (ignore buttons held at startup)
-   • mapping (Steam buttons → Xbox buttons or special actions)
-   • per-stick calibration
-   • rumble intensity scaling
-   • foreground-app polling → Game Profile auto-switch
-         │
-         ▼
-UInputGamepad → AIDL/Binder → UInputService (UID shell via Shizuku)
-                                       │
-                                       ▼
-                                JNI uinput_jni.cpp
-                                       │
-                          ┌────────────┴────────────┐
-                          ▼                          ▼
-                  gamepad device            mouse+keyboard sidecar
-                (Xbox/DS4/DualSense)      (Desktop mode, or trackpad-
-                                            as-mouse alongside a gamepad)
-                          │                          │
-                          └────────────┬─────────────┘
-                                       ▼
-                              /dev/uinput → kernel
-                                       │
-                                       ▼
-                        Android sees a real "Microsoft
-                       X-Box 360 pad" (or DS4, mouse, etc.)
+#### 1. Install the APK
+Install `QuestCTRLs to Gamepads` onto your Quest using ADB or SideQuest:
+```bash
+adb install app-debug.apk
 ```
 
-The HID protocol is parsed natively and translated into the chosen profile's button/axis layout before being written to a virtual gamepad created via Linux `uinput`. The Shizuku `UserService` runs as the `shell` user (UID 2000) which has access to `/dev/uinput` on most Android builds.
+#### 2. Start Shizuku on Quest
+After headset reboot, ensure Shizuku is running (can be started wirelessly or via ADB):
+```bash
+adb shell sh /sdcard/Android/data/moe.shizuku.privileged.api/start.sh
+```
 
-For BLE, the standard HID service (`0x1812`) is claimed by the OS, so the app uses Valve's vendor service (`100f6c32-1735-4313-b402-38567131e5f3`) directly. Connection priority is bumped to `HIGH` after connect to bring the BLE interval from ~50 ms down to ~11 ms.
+#### 3. Launch & Grant Permission
+1. Open **QuestCTRLs to Gamepads** in your Quest Library (under *Unknown Sources*).
+2. Tap the **Shizuku status banner** to grant permission.
+3. Select your target profile (e.g. **DualSense (PS5)**) and controller type (**Quest 3 / Pro / 2**).
+4. Tap **START SERVICE**.
 
-## Build
+Now launch your favorite 2D Android game, emulator, or Cloud Gaming app in Horizon OS — the game will detect a genuine physical Sony DualSense or Xbox gamepad!
 
-Standard Android Gradle build, requires:
+---
 
-- Android Studio Hedgehog or newer
-- Android Gradle Plugin 8.5+
-- Kotlin 2.0+
-- NDK + CMake 3.22.1 (for the native `uinput` JNI library)
+## 🛠️ Project Structure
 
-**First time:** open the project in Android Studio and let it sync — this regenerates the Gradle wrapper. After that:
+```
+QuestCTRLs-to-gamepads/
+├── app/
+│   ├── src/main/
+│   │   ├── aidl/com/questgamepad/android/uinput/
+│   │   │   └── IUInputService.aidl            # IPC interface for Shizuku shell service
+│   │   ├── cpp/
+│   │   │   ├── CMakeLists.txt                 # NDK build script
+│   │   │   └── uinput_jni.cpp                 # Low-latency evdev reader and /dev/uinput driver
+│   │   ├── java/com/questgamepad/android/
+│   │   │   ├── MainActivity.kt                # Main dashboard & live visual preview
+│   │   │   ├── Prefs.kt                       # Configuration store & JSON mappings
+│   │   │   ├── input/
+│   │   │   │   ├── aggregator/
+│   │   │   │   │   └── QuestControllerAggregator.kt # Merges L+R controllers, D-pad modifier, gyro
+│   │   │   │   ├── mapping/
+│   │   │   │   │   ├── ButtonMapping.kt       # Remapping engine
+│   │   │   │   │   ├── QuestSourceButton.kt   # Physical Quest buttons
+│   │   │   │   │   ├── StickCalibration.kt    # Deadzones & sensitivity curves
+│   │   │   │   │   └── TargetGamepadButton.kt # Target DualSense / Xbox buttons
+│   │   │   │   ├── model/
+│   │   │   │   │   ├── QuestControllerType.kt # Quest 2, 3, Pro, Steam, Generic
+│   │   │   │   │   ├── RawQuestControllerState.kt
+│   │   │   │   │   └── UnifiedGamepadState.kt
+│   │   │   │   └── provider/
+│   │   │   │       ├── InputProvider.kt       # Extensible input provider interface
+│   │   │   │       ├── QuestVrInputProvider.kt# Horizon OS / OpenXR input reader
+│   │   │   │       ├── QuestPanelInputProvider.kt # 2D Panel event reader
+│   │   │   │       ├── SteamControllerInputProvider.kt # USB OTG / BLE Steam Controller
+│   │   │   │       ├── GenericGamepadInputProvider.kt # Standard Android gamepad
+│   │   │   │       └── NetworkStreamingProvider.kt # Low-latency UDP socket streamer
+│   │   │   ├── service/
+│   │   │   │   └── QuestGamepadService.kt     # Foreground service with persistent notification
+│   │   │   ├── ui/
+│   │   │   │   ├── CalibrationActivity.kt     # Radial deadzones, invert Y, rumble test
+│   │   │   │   ├── DebugActivity.kt           # Real-time Hz, battery, axes & telemetry HUD
+│   │   │   │   ├── MappingActivity.kt         # Custom button remapping UI
+│   │   │   │   └── QuestVisualControllerView.kt # Custom Canvas 2D live controller preview
+│   │   │   └── uinput/
+│   │   │       ├── GamepadDescriptors.kt      # Button masks & profiles
+│   │   │       ├── GamepadProfile.kt          # DualSense, DS4, Xbox 360, Xbox One, Desktop
+│   │   │       ├── UInputGamepad.kt           # High-level Shizuku manager
+│   │   │       ├── UInputNative.kt            # JNI bindings
+│   │   │       └── UInputService.kt           # UID 2000 UserService
+│   │   └── res/                               # Layouts, vector drawables, Material 3 themes
+│   └── build.gradle.kts
+├── settings.gradle.kts
+└── build.gradle.kts
+```
 
+---
+
+## 🔨 Building from Source
+
+Requires:
+- Android SDK (API 34+)
+- Android NDK 26.1+
+- CMake 3.22.1+
+- JDK 17+
+
+Run:
 ```bash
 ./gradlew assembleDebug
-# APK lands in app/build/outputs/apk/debug/
 ```
+The output APK is generated at:
+`app/build/outputs/apk/debug/app-debug.apk`
 
-The app supports `arm64-v8a`, `armeabi-v7a` and `x86_64` ABIs.
+---
 
-For signed release builds and publishing to GitHub Releases, see [RELEASING.md](RELEASING.md).
+## 📜 Credits & License
 
-## Configuration
+- **Original Project:** [SteamController-Android](https://github.com/SonicDX12/SteamController-Android) by [Kevin (SonicDX12)](https://github.com/SonicDX12).
+- **Fork Maintainer:** [ALIEN-PL](https://github.com/ALIEN-PL).
+- **License:** Licensed under the [MIT License](LICENSE).
+  - Copyright (c) 2026 Kevin (SonicDX12)
+  - Copyright (c) 2026 ALIEN-PL
 
-Live settings and Game Profiles are persisted in `SharedPreferences`:
-
-- Selected transport (USB or Bluetooth) and paired BT device address
-- Emulated profile (Xbox 360 / Xbox One / DS4 / DualSense / Desktop)
-- Per-stick calibration (dead zone, center offset, invert Y)
-- Per-button mapping (source buttons → Xbox targets, keyboard keys, or special actions like screenshot)
-- Rumble intensity (0–100%) and mouse sensitivity (Desktop mode / trackpad sidecar)
-- Named Game Profiles, each with its own copy of the settings above plus the list of apps it auto-switches on
-
-You can tweak everything live — most changes apply within ~250 ms (next mapping cache refresh) without restarting the service. Changing transport or emulated profile requires restarting the service (or use the notification's profile cycle action). Use **Export backup** / **Import backup** in the Game Profiles screen to move all of this to a JSON file — useful before uninstalling the app or when setting it up on a new device.
-
-## Known limitations
-
-- **`shell` UID access to `/dev/uinput`** depends on the device's SELinux policy. Most stock Android builds allow it; some hardened ROMs may not. The app falls back to `injectInputEvent` automatically in that case.
-- **Steam button** passes through as `KEYCODE_BUTTON_MODE`. Android handles it as the system "Guide" key which may open the launcher in some setups.
-- **Rumble byte format** is an empirically-tuned best guess based on the Linux `hid-steam` driver. Works over Bluetooth. **USB rumble is not implemented yet** — the controller only vibrates when connected over BT.
-- **Trackpads**: usable as a mouse (Desktop mode, or as an optional sidecar cursor alongside a gamepad profile). Not yet exposed as a DualShock 4/DualSense touchpad to games that support one natively.
-- **Gyroscope** (quaternion IMU) is parsed but not yet routed anywhere. Gyro aiming is planned for a future release, fits best with the DualShock 4 / DualSense profiles.
-- **Bluetooth auto-reconnect**: if the controller powers off, the app does not retry the GATT connection.
-- **Shizuku at reboot**: the user must restart Shizuku after each reboot of the device (an Android limitation, not the app's).
-
-## Roadmap
-
-- USB rumble implementation
-- Trackpad as a real touchpad input (DS4/DualSense profile) for games that support it
-- Gyro aiming for DS4 / DualSense profiles
-- USB / BT auto-reconnect
-- HID debug log export ("Log to File")
-
-## Credits
-
-The HID protocol reverse engineering credit goes to:
-
-- [**SteamlessController**](https://github.com/ddeverill/SteamlessController) by ddeverill — the definitive `SteamController.h` byte layout reference for the SC2026
-- The [**Linux kernel `hid-steam` driver**](https://github.com/torvalds/linux/blob/master/drivers/hid/hid-steam.c) for additional validation of button bit positions and the rumble command structure
-
-Other key dependencies:
-
-- [Shizuku](https://github.com/RikkaApps/Shizuku) by RikkaApps — the `uinput` access path without root
-- [Android USB Host API](https://developer.android.com/guide/topics/connectivity/usb/host) and the BLE GATT stack
-- [Material Components for Android](https://github.com/material-components/material-components-android) for the Material 3 UI
-
-## License
-
-MIT — see [LICENSE](LICENSE).
